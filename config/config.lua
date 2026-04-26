@@ -7,7 +7,7 @@ Config = {}
 -- DEBUG
 -- ----------------------------------------------------------------
 Config.Debug = true
-
+Config.Version = true
 -- ----------------------------------------------------------------
 -- SQL — "auto" detecta automaticamente, ou force:
 -- "auto" | "oxmysql" | "ghmattimysql" | "mysql-async"

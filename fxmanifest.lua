@@ -28,6 +28,7 @@ files {
 }
 
 server_scripts {
+    'server/version.lua',
     '@ox_lib/init.lua',
     'server/sv_main.lua',
     'server/sv_shop.lua',
