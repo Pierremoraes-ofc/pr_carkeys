@@ -1,5 +1,5 @@
 -- server/version.lua
-local CURRENT_VERSION = "1.3.0"
+local CURRENT_VERSION = "1.3.1"
 local REPO_OWNER      = "Pierremoraes-ofc"
 local REPO_NAME       = "pr_carkeys"
 
