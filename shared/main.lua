@@ -39,6 +39,7 @@ end
 --   DETECÇÃO DE FRAMEWORK
 -- ============================================================
 local frameworkPriority = {
+    { resource = "qbx_core",    ownerColumn = "citizenid" },
     { resource = "qbx-core",    ownerColumn = "citizenid" },
     { resource = "ND_Core",     ownerColumn = "citizenid" },
     { resource = "ox_core",     ownerColumn = "charId"    },

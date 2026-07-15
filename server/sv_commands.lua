@@ -34,7 +34,7 @@ end
 -- ----------------------------------------------------------------
 local function getPlayerName(citizenid)
     -- QBCore / QBX: tabela players com charinfo JSON
-    if fw == "qb-core" or fw == "qbx-core" then
+    if fw == "qb-core" or fw == "qbx-core" or fw == "qbx_core" then
         local ok, rows = pcall(function()
             return ExecuteSQL(
                 "SELECT `charinfo` FROM `players` WHERE `citizenid` = ? LIMIT 1",
@@ -236,7 +236,7 @@ RegisterCommand("givekey", function(source, args, rawCommand)
             local QBCore = exports["qb-core"]:GetCoreObject()
             allowed = QBCore.Functions.HasPermission(source, "admin")
 
-        elseif fw == "qbx-core" then
+        elseif fw == "qbx-core" or fw == "qbx_core" then
             local QBCore = exports["qb-core"]:GetCoreObject()
             allowed = QBCore.Functions.HasPermission(source, "admin")
 

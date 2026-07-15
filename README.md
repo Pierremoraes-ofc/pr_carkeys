@@ -44,3 +44,8 @@ Full documentation available in:
 ## 🤝 Credits
 
 Made by **Pierremoraes-ofc**
+
+
+
+bugs:
+ao spawnar veiculo ta iniciando ligado!

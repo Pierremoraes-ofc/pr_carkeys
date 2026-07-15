@@ -31,7 +31,7 @@ end
 function VehicleLock:IsPolice()
     if not Config.Police or not Config.Police.enabled then return false end
     local fw = PRCarkeys.ActiveResource
-    if fw == "qb-core" or fw == "qbx-core" then
+    if fw == "qb-core" or fw == "qbx-core" or fw == "qbx_core" then
         local pd = exports["qb-core"]:GetCoreObject().Functions.GetPlayerData()
         local jobName = pd and pd.job and pd.job.name
         for _, job in ipairs(Config.Police.jobs) do

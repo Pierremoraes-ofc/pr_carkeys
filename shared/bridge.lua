@@ -45,7 +45,7 @@ if IsDuplicityVersion() then
         end
 
     -- qbx-core (fork do QBCore)
-    elseif fw == "qbx-core" then
+    elseif fw == "qbx-core" or fw == "qbx_core" then
         -- QBX mantém compat com exports qb-core
         local QBCore = exports["qb-core"]:GetCoreObject()
 
@@ -257,7 +257,7 @@ if IsDuplicityVersion() then
                     Player.Functions.AddItem(item, count, nil, metadata)
                     TriggerClientEvent("inventory:client:ItemBox", src, QBCore.Shared.Items[item], "add")
                 end
-            elseif fw == "qbx-core" then
+            elseif fw == "qbx-core" or fw == "qbx_core" then
                 local QBCore = exports["qb-core"]:GetCoreObject()
                 local Player = QBCore.Functions.GetPlayer(src)
                 if Player then
@@ -321,7 +321,7 @@ if IsDuplicityVersion() then
             TriggerClientEvent("QBCore:Notify", src, data.description, data.type or "primary")
 
         -- qbx-core
-        elseif fw == "qbx-core" then
+        elseif fw == "qbx-core" or fw == "qbx_core" then
             TriggerClientEvent("QBCore:Notify", src, data.description, data.type or "primary")
 
         -- ESX
@@ -360,7 +360,7 @@ if not IsDuplicityVersion() then
             exports["qb-core"]:GetCoreObject().Functions.Notify(data.description, data.type or "primary")
 
         -- qbx-core
-        elseif fw == "qbx-core" then
+        elseif fw == "qbx-core" or fw == "qbx_core" then
             exports["qb-core"]:GetCoreObject().Functions.Notify(data.description, data.type or "primary")
 
         -- ESX
@@ -517,7 +517,7 @@ if not IsDuplicityVersion() then
             if job == j then return true end
         end
 
-    elseif fw == "qbx-core" then
+    elseif fw == "qbx-core" or fw == "qbx_core" then
         local pd  = exports["qb-core"]:GetCoreObject().Functions.GetPlayerData()
         local job = pd and pd.job and pd.job.name
         if not job then return false end

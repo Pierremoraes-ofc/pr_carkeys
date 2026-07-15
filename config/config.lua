@@ -6,7 +6,7 @@ Config = {}
 -- ----------------------------------------------------------------
 -- DEBUG
 -- ----------------------------------------------------------------
-Config.Debug = true
+Config.Debug = false
 Config.Version = true
 -- ----------------------------------------------------------------
 -- SQL — "auto" detecta automaticamente, ou force:
@@ -16,7 +16,7 @@ Config.SQL = "auto"
 
 -- ----------------------------------------------------------------
 -- FRAMEWORK — "auto" detecta automaticamente, ou force:
--- "qb-core" | "qbx-core" | "es_extended" | "ox_core" | "ND_Core"
+-- "qb-core" | "qbx_core" | "qbx-core" | "es_extended" | "ox_core" | "ND_Core"
 -- ----------------------------------------------------------------
 Config.Framework = "auto"
 

@@ -680,7 +680,7 @@ RegisterNetEvent("pr_carkeys:server:returnKeyFromVehicle", function(vehNetId, pl
     if Config.Default.KeyMetadata and Config.Default.KeyMetadata.showOwner then
         local fw = PRCarkeys.ActiveResource
         local ok2, nrows = pcall(function()
-            if fw == "qb-core" or fw == "qbx-core" then
+            if fw == "qb-core" or fw == "qbx-core" or fw == "qbx_core" then
                 return ExecuteSQL(
                     "SELECT `charinfo` FROM `players` WHERE `citizenid` = ? LIMIT 1",
                     { keyData.citizenid }
@@ -819,6 +819,100 @@ function PRCarkeys.RemoveTempKey(src, plate)
     TriggerClientEvent("pr_carkeys:client:removeTempKey", src, plate)
 end
 
+local function getTemporaryKeyItems()
+    local items = {}
+    for itemName, cfg in pairs(Config.KeyTypes or {}) do
+        if cfg.keyType == "temporary" then
+            items[#items + 1] = itemName
+        end
+    end
+    return items
+end
+
+local function removeTemporaryItemFromOxInventory(inventoryId, plate)
+    for _, itemName in ipairs(getTemporaryKeyItems()) do
+        local slots = exports.ox_inventory:GetSlotsWithItem(inventoryId, itemName, nil)
+        if slots then
+            for _, slot in pairs(slots) do
+                local meta = slot.metadata or {}
+                if meta.plate and sanitize(meta.plate) == plate then
+                    return not not exports.ox_inventory:RemoveItem(inventoryId, itemName, 1, nil, slot.slot)
+                end
+            end
+        end
+    end
+    return false
+end
+
+function PRCarkeys.RemoveTempKeyItem(src, plate)
+    plate = sanitize(plate)
+    if not plate then return false end
+
+    local removed = false
+    if ActiveInventory == "ox_inventory" then
+        removed = removeTemporaryItemFromOxInventory(src, plate)
+
+        if not removed then
+            for _, bagName in ipairs({ "carkey_bag", "carkey_bag_large" }) do
+                local bagSlots = exports.ox_inventory:GetSlotsWithItem(src, bagName, nil)
+                if bagSlots then
+                    for _, bagSlot in pairs(bagSlots) do
+                        local bagMeta = bagSlot.metadata or {}
+                        if bagMeta.barcode then
+                            local stashId = "pr_carkeys_bag_" .. bagMeta.barcode
+                            removed = removeTemporaryItemFromOxInventory(stashId, plate)
+                            if removed then break end
+                        end
+                    end
+                end
+                if removed then break end
+            end
+        end
+    else
+        local Player = Bridge.framework.GetPlayer(src)
+        if Player then
+            for slot, item in pairs(Player.PlayerData.items or {}) do
+                local cfg = item and Config.KeyTypes[item.name]
+                local meta = item and (item.info or item.metadata) or {}
+                if cfg and cfg.keyType == "temporary" and meta.plate and sanitize(meta.plate) == plate then
+                    removed = not not Player.Functions.RemoveItem(item.name, 1, slot)
+                    break
+                end
+            end
+        end
+    end
+
+    PRCarkeys.RemoveTempKey(src, plate)
+    return removed
+end
+
+function PRCarkeys.RemoveKeysForOwnerPlate(citizenid, plate, keyType)
+    plate = sanitize(plate)
+    if not citizenid or not plate then return 0 end
+
+    local where = "citizenid = ? AND plate = ?"
+    local params = { citizenid, plate }
+    if keyType then
+        where = where .. " AND key_type = ?"
+        params[#params + 1] = keyType
+    end
+
+    local rows = ExecuteSQL(("SELECT barcode FROM pr_carkeys WHERE %s"):format(where), params) or {}
+    local targetSrc = getOnlineSourceByCitizenid(citizenid)
+
+    for _, row in ipairs(rows) do
+        if targetSrc and row.barcode then
+            Bridge.inventory.RemoveItemByBarcode(targetSrc, row.barcode)
+        end
+        if row.barcode then
+            PRCarkeys.Cache.InvalidateKey(row.barcode)
+        end
+    end
+
+    ExecuteSQL(("DELETE FROM pr_carkeys WHERE %s"):format(where), params)
+    return #rows
+end
+
 RegisterNetEvent("pr_carkeys:server:syncTempKeys", function()
     local src       = source
     local citizenid = Bridge.framework.GetIdentifier(src)
@@ -940,7 +1034,7 @@ function PRCarkeys.IsPlayerPolice(src)
     local citizenid = Bridge.framework.GetIdentifier(src)
     if not citizenid then return false end
     local fw = PRCarkeys.ActiveResource
-    if fw == "qb-core" or fw == "qbx-core" then
+    if fw == "qb-core" or fw == "qbx-core" or fw == "qbx_core" then
         local Player = Bridge.framework.GetPlayer(src)
         if not Player then return false end
         local jobName = Player.PlayerData.job and Player.PlayerData.job.name
@@ -1126,6 +1220,20 @@ end)
 
 exports("GiveTempKey",    function(src, plate) PRCarkeys.GiveTempKey(src, plate) end)
 exports("RemoveTempKey",  function(src, plate) PRCarkeys.RemoveTempKey(src, plate) end)
+exports("CreateTempKeyItem", function(src, plate, itemName)
+    if not PRCarkeys.CreateTempKeyItem then return nil end
+    return PRCarkeys.CreateTempKeyItem(src, plate, itemName)
+end)
+exports("CreateTimedKeyItem", function(src, plate, durationSec, itemName, level)
+    if not PRCarkeys.CreateTimedKeyItem then return nil end
+    return PRCarkeys.CreateTimedKeyItem(src, plate, durationSec, itemName, level)
+end)
+exports("RemoveTempKeyItem", function(src, plate)
+    return PRCarkeys.RemoveTempKeyItem(src, plate)
+end)
+exports("RemoveKeysForOwnerPlate", function(citizenid, plate, keyType)
+    return PRCarkeys.RemoveKeysForOwnerPlate(citizenid, plate, keyType)
+end)
 exports("IsPlayerPolice", function(src) return PRCarkeys.IsPlayerPolice(src) end)
 exports("SetLockState",   function(vehicle, state)
     if not vehicle or vehicle == 0 then return end
@@ -1138,6 +1246,89 @@ exports("GiveKeys", function(src, vehicle)
         or tostring(vehicle)
     if plate then PRCarkeys.GiveTempKey(src, plate) end
 end)
+
+exports("GetKeys", function(src)
+    local citizenid = Bridge.framework.GetIdentifier(src)
+    if not citizenid then return {} end
+
+    local plates = {}
+
+    -- 1. TempKeys
+    if TempKeys[citizenid] then
+        for plate, tempEntry in pairs(TempKeys[citizenid]) do
+            if tempEntry then
+                plates[sanitize(plate)] = true
+            end
+        end
+    end
+
+    -- 2. VehiclesWithKeyInside
+    for _, data in pairs(VehiclesWithKeyInside) do
+        if data.citizenid == citizenid then
+            plates[sanitize(data.plate)] = true
+        end
+    end
+
+    -- 3. Inventory items
+    if ActiveInventory == "ox_inventory" then
+        for itemName, _ in pairs(Config.KeyTypes) do
+            local slots = exports.ox_inventory:GetSlotsWithItem(src, itemName, nil)
+            if slots then
+                for _, slot in pairs(slots) do
+                    local meta = slot.metadata or {}
+                    if meta.plate then
+                        plates[sanitize(meta.plate)] = true
+                    end
+                end
+            end
+        end
+
+        -- Bolsas
+        for _, bagName in ipairs({ "carkey_bag", "carkey_bag_large" }) do
+            local bagSlots = exports.ox_inventory:GetSlotsWithItem(src, bagName, nil)
+            if bagSlots then
+                for _, bagSlot in pairs(bagSlots) do
+                    local bagMeta = bagSlot.metadata or {}
+                    if bagMeta.barcode then
+                        local stashId = "pr_carkeys_bag_" .. bagMeta.barcode
+                        for itemName, _ in pairs(Config.KeyTypes) do
+                            local keySlots = exports.ox_inventory:GetInventoryItems(stashId)
+                            if keySlots then
+                                for _, kItem in pairs(keySlots) do
+                                    if kItem and kItem.name == itemName then
+                                        local kMeta = kItem.metadata or {}
+                                        if kMeta.plate then
+                                            plates[sanitize(kMeta.plate)] = true
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    else
+        local Player = Bridge.framework.GetPlayer(src)
+        if Player then
+            for _, item in pairs(Player.PlayerData.items or {}) do
+                if item and Config.KeyTypes[item.name] then
+                    local meta = item.info or item.metadata or {}
+                    if meta.plate then
+                        plates[sanitize(meta.plate)] = true
+                    end
+                end
+            end
+        end
+    end
+
+    local list = {}
+    for plate, _ in pairs(plates) do
+        list[#list + 1] = plate
+    end
+    return list
+end)
+
 
 -- ================================================================
 --   BUSCA CHAVES NAS BOLSAS DO PLAYER (server-side)
