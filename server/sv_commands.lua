@@ -232,24 +232,12 @@ RegisterCommand("givekey", function(source, args, rawCommand)
         if IsPlayerAceAllowed(source, "command.givekey") then
             allowed = true
 
-        elseif fw == "qb-core" then
-            local QBCore = exports["qb-core"]:GetCoreObject()
-            allowed = QBCore.Functions.HasPermission(source, "admin")
+        elseif pr_lib.framework.HasPermission and pr_lib.framework.HasPermission(source, "admin") then
+            allowed = true
 
-        elseif fw == "qbx-core" or fw == "qbx_core" then
-            local QBCore = exports["qb-core"]:GetCoreObject()
-            allowed = QBCore.Functions.HasPermission(source, "admin")
-
-        elseif fw == "es_extended" then
-            local ESX     = exports["es_extended"]:getSharedObject()
-            local xPlayer = ESX.GetPlayerFromId(source)
-            allowed = xPlayer and (xPlayer.getGroup() == "admin" or xPlayer.getGroup() == "superadmin")
-
-        elseif fw == "ox_core" then
-            allowed = IsPlayerAceAllowed(source, "command.givekey")
-
-        elseif fw == "ND_Core" then
-            allowed = IsPlayerAceAllowed(source, "command.givekey")
+        elseif pr_lib.framework.GetPlayerGroup then
+            local group = pr_lib.framework.GetPlayerGroup(source)
+            allowed = group == "admin" or group == "superadmin"
         end
 
         if not allowed then

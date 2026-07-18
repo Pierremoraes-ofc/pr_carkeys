@@ -7,6 +7,18 @@
 
 local VehicleState = require 'client.modules.vehicle_state'
 
+local function emitLockChanged(vehicle, plate, lockState)
+    if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then return end
+
+    TriggerEvent("pr_carkeys:client:vehicleLockChanged", {
+        vehicle = vehicle,
+        netId = NetworkGetNetworkIdFromEntity(vehicle),
+        plate = plate,
+        lockState = lockState,
+        unlocked = lockState == 1 or lockState == 0
+    })
+end
+
 -- ----------------------------------------------------------------
 -- Uso do item chave — disparado pelo server via RegisterUsableItem
 -- ----------------------------------------------------------------
@@ -101,6 +113,9 @@ RegisterNetEvent("pr_carkeys:client:executeUseKey", function(keyData)
 
     -- Aplicar lock localmente e sincronizar no servidor
     SetVehicleDoorsLocked(vehicle, newState)
+    SetVehicleDoorsLockedForAllPlayers(vehicle, newState == 2)
+    SetVehicleDoorsLockedForPlayer(vehicle, PlayerId(), newState == 2)
+    emitLockChanged(vehicle, plate, newState)
     TriggerServerEvent("pr_carkeys:server:setVehicleLockState",
         NetworkGetNetworkIdFromEntity(vehicle), newState, plate)
 

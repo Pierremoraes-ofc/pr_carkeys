@@ -15,9 +15,40 @@ local VehicleState = {
     hasKey          = false,
     currentWeapon   = nil,
     showHotwireHint = false,
+    hotwireToken    = nil,
     --- "hotwire" | "pickup" | nil — distingue TextUI de ligação direta vs pegar chave no carro
     textUiMode      = nil,
 }
+
+local function snapshotTableValues(source)
+    local values = {}
+    if type(source) ~= "table" then return values end
+
+    local lastKey = nil
+    while true do
+        local ok, key, value = pcall(next, source, lastKey)
+        if not ok or key == nil then break end
+        values[#values + 1] = value
+        lastKey = key
+    end
+
+    return values
+end
+
+local function countTableEntries(source)
+    local count = 0
+    if type(source) ~= "table" then return count end
+
+    local lastKey = nil
+    while true do
+        local ok, key = pcall(next, source, lastKey)
+        if not ok or key == nil then break end
+        count = count + 1
+        lastKey = key
+    end
+
+    return count
+end
 
 --- Retorna dados da chave permanente para a placa (ou nil)
 ---@param plate string
@@ -99,24 +130,13 @@ function VehicleState:RebuildFromInventory()
         }
     end
 
-    if ActiveInventory == "ox_inventory" then
-        -- Inventário direto
-        local allItems = exports.ox_inventory:GetPlayerItems()
-        if allItems then
-            for _, item in pairs(allItems) do
-                processItem(item)
-            end
-        end
-        -- Bolsas são lidas pelo servidor via fetchAllKeysIncludingBags
-        -- chamado após este rebuild quando necessário
-    else
-        local data = exports["qb-core"]:GetCoreObject().Functions.GetPlayerData()
-        local allItems = data and data.items or nil
-        if allItems then
-            for _, item in pairs(allItems) do
-                processItem(item)
-            end
-        end
+    local allItems = (pr_lib.inventory.GetPlayerItems and pr_lib.inventory.GetPlayerItems())
+        or (pr_lib.framework.GetPlayerInventory and pr_lib.framework.GetPlayerInventory())
+        or {}
+
+    local items = snapshotTableValues(allItems)
+    for i = 1, #items do
+        processItem(items[i])
     end
 
     if self.currentPlate then
@@ -124,7 +144,7 @@ function VehicleState:RebuildFromInventory()
     end
 
     Debug("INFO", ("[VehicleState] Inventário reconstruído | permanentes: %d"):format(
-        (function() local c=0; for _ in pairs(self.permanentKeys) do c=c+1 end; return c end)()
+        countTableEntries(self.permanentKeys)
     ))
 end
 
@@ -152,6 +172,7 @@ function VehicleState:Reset()
     self.hasKey          = false
     self.currentWeapon   = nil
     self.showHotwireHint = false
+    self.hotwireToken    = nil
     self.textUiMode      = nil
 end
 

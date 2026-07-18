@@ -15,16 +15,8 @@ local function openBagStash(src, stashId, bagConfig)
         false
     )
 
-    if ActiveInventory == "ox_inventory" then
-        -- Client abre via export local (evita "cannot open inventory is busy")
-        TriggerClientEvent("pr_carkeys:client:openStash", src, stashId)
-    else
-        exports["qb-inventory"]:OpenInventory(src, stashId, {
-            label     = bagConfig.label,
-            maxweight = bagConfig.weight,
-            slots     = bagConfig.slots,
-        })
-    end
+    -- Client abre via pr_bridge para evitar inventario ocupado no servidor.
+    TriggerClientEvent("pr_carkeys:client:openStash", src, stashId)
 end
 
 -- ----------------------------------------------------------------
@@ -33,16 +25,8 @@ end
 local function ensureBagBarcode(src, slot, item, bagConfig)
     local metadata = {}
 
-    if ActiveInventory == "ox_inventory" then
-        local slotData = Bridge.inventory.GetItemBySlot(src, slot)
-        metadata = (slotData and (slotData.metadata or slotData.info)) or {}
-    else
-        local Player = Bridge.framework.GetPlayer(src)
-        if Player then
-            local slotItem = Player.PlayerData.items and Player.PlayerData.items[slot]
-            metadata = (slotItem and (slotItem.info or slotItem.metadata)) or {}
-        end
-    end
+    local slotData = Bridge.inventory.GetItemBySlot(src, slot)
+    metadata = (slotData and (slotData.metadata or slotData.info)) or {}
 
     if not metadata.barcode then
         metadata.barcode = PRCarkeys.GenerateBarcode()

@@ -214,7 +214,16 @@ end
 -- ----------------------------------------------------------------
 function shallowCopy(orig)
     local copy = {}
-    for k, v in pairs(orig) do copy[k] = v end
+    if type(orig) ~= "table" then return copy end
+
+    local lastKey = nil
+    while true do
+        local ok, key, value = pcall(next, orig, lastKey)
+        if not ok or key == nil then break end
+        copy[key] = value
+        lastKey = key
+    end
+
     return copy
 end
 
@@ -438,8 +447,21 @@ RegisterNetEvent("pr_carkeys:client:keyConfigUpdated", function(barcode, field, 
     local VehicleState = require 'client.modules.vehicle_state'
 
     -- Atualiza diretamente no VehicleState.permanentKeys pelo barcode
-    for plate, data in pairs(VehicleState.permanentKeys) do
-        if data.barcode == barcode then
+    local plateKeys = {}
+    do
+        local lastKey = nil
+        while true do
+            local ok, key = pcall(next, VehicleState.permanentKeys, lastKey)
+            if not ok or key == nil then break end
+            plateKeys[#plateKeys + 1] = key
+            lastKey = key
+        end
+    end
+
+    for i = 1, #plateKeys do
+        local plate = plateKeys[i]
+        local data = VehicleState.permanentKeys[plate]
+        if data and data.barcode == barcode then
             if field == "sound" then
                 data.sound = value
             elseif field == "distance" then

@@ -18,6 +18,21 @@ local function Trim(v)
     return v:gsub("^%s*(.-)%s*$", "%1")
 end
 
+local function keySnapshot(source)
+    local keys = {}
+    if type(source) ~= "table" then return keys end
+
+    local lastKey = nil
+    while true do
+        local ok, key = pcall(next, source, lastKey)
+        if not ok or key == nil then break end
+        keys[#keys + 1] = key
+        lastKey = key
+    end
+
+    return keys
+end
+
 local function playSound(vehicle, soundId)
     if not GetResourceState("pr_3dsound"):find("start") then return end
     local c = GetEntityCoords(vehicle)
@@ -28,28 +43,70 @@ local function playSound(vehicle, soundId)
     )
 end
 
-function VehicleLock:IsPolice()
-    if not Config.Police or not Config.Police.enabled then return false end
-    local fw = PRCarkeys.ActiveResource
-    if fw == "qb-core" or fw == "qbx-core" or fw == "qbx_core" then
-        local pd = exports["qb-core"]:GetCoreObject().Functions.GetPlayerData()
-        local jobName = pd and pd.job and pd.job.name
-        for _, job in ipairs(Config.Police.jobs) do
-            if jobName == job then return true end
+local function emitLockChanged(vehicle, plate, lockState)
+    if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then return end
+
+    TriggerEvent("pr_carkeys:client:vehicleLockChanged", {
+        vehicle = vehicle,
+        netId = NetworkGetNetworkIdFromEntity(vehicle),
+        plate = plate,
+        lockState = lockState,
+        unlocked = lockState == 1 or lockState == 0
+    })
+end
+
+local function emitRevEngineState(vehicle, plate, active)
+    if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then return end
+
+    TriggerEvent("pr_carkeys:client:revEngineState", {
+        vehicle = vehicle,
+        netId = NetworkGetNetworkIdFromEntity(vehicle),
+        plate = plate,
+        active = active == true
+    })
+end
+
+local function requestVehicleControl(vehicle, timeoutMs)
+    if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then return false end
+    if NetworkHasControlOfEntity(vehicle) then return true end
+
+    local netId = NetworkGetNetworkIdFromEntity(vehicle)
+    if netId and netId ~= 0 and netId ~= 65533 then
+        SetNetworkIdCanMigrate(netId, true)
+    end
+
+    local deadline = GetGameTimer() + (timeoutMs or 750)
+    NetworkRequestControlOfEntity(vehicle)
+    while DoesEntityExist(vehicle) and not NetworkHasControlOfEntity(vehicle) and GetGameTimer() < deadline do
+        NetworkRequestControlOfEntity(vehicle)
+        Wait(0)
+    end
+
+    return DoesEntityExist(vehicle) and NetworkHasControlOfEntity(vehicle)
+end
+
+local function ensureEngineRunningAfterUnlock(vehicle, plate)
+    if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then return end
+
+    VehicleState.hasKey = true
+    if not GetIsVehicleEngineRunning(vehicle) then
+        SetVehicleEngineOn(vehicle, true, false, true)
+        local t = 0
+        while not GetIsVehicleEngineRunning(vehicle) and t < 1500 do
+            Wait(100)
+            t = t + 100
         end
-    elseif fw == "es_extended" then
-        local xPlayer = exports["es_extended"]:getSharedObject().GetPlayerData()
-        local jobName = xPlayer and xPlayer.job and xPlayer.job.name
-        for _, job in ipairs(Config.Police.jobs) do
-            if jobName == job then return true end
-        end
-    elseif fw == "ox_core" then
-        local groups = exports["ox_core"]:GetPlayerData().groups or {}
-        for _, job in ipairs(Config.Police.jobs) do
-            if groups[job] then return true end
+
+        if GetIsVehicleEngineRunning(vehicle) and plate then
+            PRCarkeys.OnEngineStarted(vehicle, plate)
         end
     end
-    return false
+
+    VehicleState.isEngineRunning = GetIsVehicleEngineRunning(vehicle)
+end
+
+function VehicleLock:IsPolice()
+    return Bridge.framework.isPolice() == true
 end
 
 function VehicleLock:Toggle()
@@ -66,19 +123,26 @@ function VehicleLock:Toggle()
         local playerPos = GetEntityCoords(cache.ped)
         local bestVeh, bestDist, bestPlate, bestData = nil, math.huge, nil, nil
 
-        for p, data in pairs(VehicleState.permanentKeys) do
-            local dist = data.distance or Config.Default.UseKeyAnim.DefaultDistance
-            local veh  = PRCarkeys.FindVehicleByPlate(p, dist)
-            if veh then
-                local d = #(playerPos - GetEntityCoords(veh))
-                if d < bestDist then
-                    bestDist = d; bestVeh = veh; bestPlate = p; bestData = data
+        local permanentPlates = keySnapshot(VehicleState.permanentKeys)
+        for i = 1, #permanentPlates do
+            local p = permanentPlates[i]
+            local data = VehicleState.permanentKeys[p]
+            if data then
+                local dist = data.distance or Config.Default.UseKeyAnim.DefaultDistance
+                local veh  = PRCarkeys.FindVehicleByPlate(p, dist)
+                if veh then
+                    local d = #(playerPos - GetEntityCoords(veh))
+                    if d < bestDist then
+                        bestDist = d; bestVeh = veh; bestPlate = p; bestData = data
+                    end
                 end
             end
         end
 
         if not bestVeh then
-            for p, _ in pairs(VehicleState.temporaryKeys) do
+            local temporaryPlates = keySnapshot(VehicleState.temporaryKeys)
+            for i = 1, #temporaryPlates do
+                local p = temporaryPlates[i]
                 local veh = PRCarkeys.FindVehicleByPlate(p, Config.Default.UseKeyAnim.DefaultDistance)
                 if veh then
                     local d = #(playerPos - GetEntityCoords(veh))
@@ -105,7 +169,7 @@ function VehicleLock:Toggle()
     -- Consulta o servidor se realmente tem a chave no inventário AGORA
     -- Bloqueia o toggle até receber resposta (evita cache desatualizado)
     if not self:IsPolice() then
-        local hasAccess = lib.callback.await("pr_carkeys:server:validateKeyAccess", false, plate)
+        local hasAccess = pr_lib.callback.await("pr_carkeys:server:validateKeyAccess", false, plate)
         if not hasAccess then
             -- Força rebuild do inventário para corrigir estado local
             VehicleState:RebuildFromInventory()
@@ -128,6 +192,9 @@ function VehicleLock:Toggle()
     local locking    = (newState == 2)
 
     SetVehicleDoorsLocked(vehicle, newState)
+    SetVehicleDoorsLockedForAllPlayers(vehicle, newState == 2)
+    SetVehicleDoorsLockedForPlayer(vehicle, PlayerId(), newState == 2)
+    emitLockChanged(vehicle, plate, newState)
     TriggerServerEvent("pr_carkeys:server:setVehicleLockState",
         NetworkGetNetworkIdFromEntity(vehicle), newState, plate)
 
@@ -142,32 +209,89 @@ function VehicleLock:Toggle()
         end
         PRCarkeys.Notify(Config.Notify.keyLocked)
     else
+        SetVehicleUndriveable(vehicle, false)
+        SetVehicleDoorsLocked(vehicle, 1)
+        SetVehicleDoorsLockedForAllPlayers(vehicle, false)
+        SetVehicleDoorsLockedForPlayer(vehicle, PlayerId(), false)
+
         if keyData and keyData.motor then
+            if Config.Default.RevEngineEffect ~= false then
+                CreateThread(function()
+                    if not DoesEntityExist(vehicle) then return end
+                    local vehicleState = Entity(vehicle).state
+                    local hadSkipRevPed = vehicleState and vehicleState.pr_carkeys_skipRevPed == true
+                    vehicleState:set('pr_carkeys_revving', true, true)
+                    SetVehicleDoorsLockedForAllPlayers(vehicle, true)
+                    emitRevEngineState(vehicle, plate, true)
+                    SetVehicleDoorsLocked(vehicle, 6)
 
-            --  Faz o efeito de motor ligando sozinho 'rev engine'
-            --  Pai é brabo demais 
-            CreateThread(function()
-                local pedModel = joaat("a_m_y_business_01")
-                RequestModel(pedModel)
-                local t = 0
-                while not HasModelLoaded(pedModel) and t < 2000 do Wait(10); t = t + 10 end
-                if not HasModelLoaded(pedModel) then return end
-                local vCoords = GetEntityCoords(vehicle)
-                local ped = CreatePed(4, pedModel, vCoords.x, vCoords.y, vCoords.z, 0.0, false, true)
-                if not DoesEntityExist(ped) then SetModelAsNoLongerNeeded(pedModel); return end
-                SetEntityVisible(ped, false, false)
-                SetEntityCollision(ped, false, false)
-                SetPedCanBeTargetted(ped, false)
-                SetBlockingOfNonTemporaryEvents(ped, true)
-                SetPedRagdollOnCollision(ped, false)
-                SetPedIntoVehicle(ped, vehicle, -1)
-                
-                local isEngineRunning = GetIsVehicleEngineRunning(vehicle)
-                SetVehicleEngineOn(vehicle, not isEngineRunning, false, true)
+                    local pedModel = joaat("a_m_y_business_01")
+                    local ped = nil
+                    RequestModel(pedModel)
+                    local t = 0
+                    while not HasModelLoaded(pedModel) and t < 2000 do Wait(10); t = t + 10 end
+                    if not HasModelLoaded(pedModel) then vehicleState:set('pr_carkeys_revving', nil, true); emitRevEngineState(vehicle, plate, false); return end
+                    if not DoesEntityExist(vehicle) then SetModelAsNoLongerNeeded(pedModel); vehicleState:set('pr_carkeys_revving', nil, true); emitRevEngineState(vehicle, plate, false); return end
 
-                Wait(2000)
-                DeletePed(ped)
-            end)
+                    local currentDriver = GetPedInVehicleSeat(vehicle, -1)
+                    if currentDriver ~= 0 and currentDriver ~= cache.ped then
+                        SetModelAsNoLongerNeeded(pedModel)
+                        vehicleState:set('pr_carkeys_revving', nil, true)
+                        emitRevEngineState(vehicle, plate, false)
+                        return
+                    end
+
+                    local vCoords = GetEntityCoords(vehicle)
+                    ped = CreatePed(4, pedModel, vCoords.x, vCoords.y, vCoords.z, 0.0, false, true)
+                    if not DoesEntityExist(ped) then
+                        SetModelAsNoLongerNeeded(pedModel)
+                        vehicleState:set('pr_carkeys_revving', nil, true)
+                        emitRevEngineState(vehicle, plate, false)
+                        return
+                    end
+                    SetEntityAsMissionEntity(ped, true, true)
+                    SetEntityVisible(ped, false, false)
+                    SetEntityAlpha(ped, 50, true)
+                    SetEntityCollision(ped, false, false)
+                    SetPedCanBeTargetted(ped, false)
+                    SetBlockingOfNonTemporaryEvents(ped, true)
+                    SetPedRagdollOnCollision(ped, false)
+
+                    local seat = IsVehicleSeatFree(vehicle, -1) and -1 or (IsVehicleSeatFree(vehicle, 0) and 0 or nil)
+                    if seat then
+                        SetPedIntoVehicle(ped, vehicle, seat)
+                    end
+                    
+                    local isEngineRunning = GetIsVehicleEngineRunning(vehicle)
+                    SetVehicleEngineOn(vehicle, not isEngineRunning, false, true)
+
+                    Wait(Config.Default.RevEngineSeatHoldMs or 850)
+                    if ped and DoesEntityExist(ped) then
+                        ClearPedTasksImmediately(ped)
+                        DeletePed(ped)
+                        DeleteEntity(ped)
+                        SetVehicleDoorsLocked(vehicle, 1)
+                        SetVehicleDoorsLockedForAllPlayers(vehicle, false)
+                    end
+                    SetModelAsNoLongerNeeded(pedModel)
+
+                    if DoesEntityExist(vehicle) then
+                        requestVehicleControl(vehicle, 1000)
+                        FreezeEntityPosition(vehicle, false)
+                        SetVehicleHandbrake(vehicle, false)
+                        SetVehicleUndriveable(vehicle, false)
+                        SetVehicleDoorsLocked(vehicle, 1)
+                        SetVehicleDoorsLockedForAllPlayers(vehicle, false)
+                        SetVehicleDoorsLockedForPlayer(vehicle, PlayerId(), false)
+                        vehicleState:set('pr_carkeys_revving', nil, true)
+                        if hadSkipRevPed then
+                            vehicleState:set('pr_carkeys_skipRevPed', true, true)
+                        end
+                        emitRevEngineState(vehicle, plate, false)
+                    end
+                end)
+            end
+
 
             --  mantém o motor ligado após ter entrado no carro!
             CreateThread(function()
@@ -178,8 +302,6 @@ function VehicleLock:Toggle()
                     local vehiPlayer = GetVehiclePedIsIn(cache.ped, false)    
 
                     if vehiPlayer ~= 0 and DoesEntityExist(vehiPlayer) then 
-                        toggleEngine()                  
-                        VehicleState.isEngineRunning = true
                         local myPlate = Trim(GetVehicleNumberPlateText(vehicle))
                         local playerPlate = Trim(GetVehicleNumberPlateText(vehiPlayer))            
                         Debug("INFO", ("[VehicleLock] Meu: %s | Player: %s"):format(myPlate, playerPlate))            
@@ -190,6 +312,7 @@ function VehicleLock:Toggle()
                             -- preciso fazer uma condicional para bloquear isso!
                             break -- 🔥 para o loop após confirmar
                         end
+                        ensureEngineRunningAfterUnlock(vehiPlayer, playerPlate)
                         break -- 🔥 para o loop após confirmar
                     end
                 end
@@ -224,7 +347,7 @@ function toggleEngine()
 
     -- Validação obrigatória no servidor ANTES de ligar/desligar motor.
     -- Mantém o mesmo padrão de segurança do lock/unlock.
-    local hasAccess = lib.callback.await("pr_carkeys:server:validateKeyAccess", false, plate)
+    local hasAccess = pr_lib.callback.await("pr_carkeys:server:validateKeyAccess", false, plate)
     if not hasAccess then
         VehicleState:RebuildFromInventory()
         VehicleState.hasKey = false

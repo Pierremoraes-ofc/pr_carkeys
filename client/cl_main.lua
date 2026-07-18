@@ -41,17 +41,9 @@ function PRCarkeys.ProgressBar(label, duration, anim, cb)
 
     local success = false
 
-    -- ox_lib progressBar (bloqueante na thread atual)
-    if GetResourceState("ox_lib"):find("start") and lib and lib.progressBar then
-        success = lib.progressBar({
-            duration  = duration,
-            label     = label,
-            canCancel = true,
-            disable   = { move = true, car = true, combat = true },
-        })
+    success = Bridge.progress.doProgressbar(duration, label, anim)
 
-    else
-        -- Fallback simples: espera a duração e considera sucesso
+    if success == nil then
         Wait(duration)
         success = true
     end
@@ -144,8 +136,7 @@ end
 -- QBCore
 AddEventHandler("QBCore:Client:OnPlayerLoaded", function()
     PRCarkeys.PlayerLoaded = true
-    local QBCore = exports["qb-core"]:GetCoreObject()
-    PRCarkeys.PlayerData = QBCore.Functions.GetPlayerData() or {}
+    PRCarkeys.PlayerData = pr_lib.framework.GetPlayerData() or {}
     PRCarkeys.Debug("Player carregado (QBCore).")
 end)
 

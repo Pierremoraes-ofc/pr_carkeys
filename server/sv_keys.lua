@@ -167,27 +167,7 @@ local function getKeyDataHandler(src, barcode)
     return row
 end
 
--- Registro via lib.callback (ox_lib) se disponível, senão via NetEvent
-if GetResourceState("ox_lib"):find("start") then
-    -- Aguarda lib estar inicializado
-    SetTimeout(200, function()
-        if lib and lib.callback then
-            lib.callback.register("pr_carkeys:server:getKeyData", getKeyDataHandler)
-        else
-            RegisterNetEvent("pr_carkeys:server:getKeyData", function(barcode)
-                local src    = source
-                local result = getKeyDataHandler(src, barcode)
-                TriggerClientEvent("pr_carkeys:client:getKeyDataReturn", src, result)
-            end)
-        end
-    end)
-else
-    RegisterNetEvent("pr_carkeys:server:getKeyData", function(barcode)
-        local src    = source
-        local result = getKeyDataHandler(src, barcode)
-        TriggerClientEvent("pr_carkeys:client:getKeyDataReturn", src, result)
-    end)
-end
+pr_lib.callback.register("pr_carkeys:server:getKeyData", getKeyDataHandler)
 
 -- ----------------------------------------------------------------
 -- Deletar chave

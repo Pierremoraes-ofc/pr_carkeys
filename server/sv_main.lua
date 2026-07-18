@@ -17,28 +17,28 @@ end
 
 local function removeTemporaryKeysFromPlayerInventory(src, tempItems)
     for itemName, _ in pairs(tempItems) do
-        local slots = exports.ox_inventory:GetSlotsWithItem(src, itemName, nil)
+        local slots = pr_lib.inventory.GetSlotsWithItem(src, itemName, nil)
         if slots then
             for _, slot in pairs(slots) do
-                exports.ox_inventory:RemoveItem(src, itemName, slot.count or 1, nil, slot.slot)
+                pr_lib.inventory.RemoveItem(src, itemName, slot.count or 1, nil, slot.slot)
             end
         end
     end
 end
 
 local function removeTemporaryKeysFromPlayerBags(src, tempItems)
-    for _, bagName in ipairs({ "carkey_bag", "carkey_bag_large" }) do
-        local bagSlots = exports.ox_inventory:GetSlotsWithItem(src, bagName, nil)
+    for bagName in pairs(Config.Bags or {}) do
+        local bagSlots = pr_lib.inventory.GetSlotsWithItem(src, bagName, nil)
         if bagSlots then
             for _, bagSlot in pairs(bagSlots) do
                 local bagMeta = bagSlot.metadata or {}
                 if bagMeta.barcode then
-                    local stashId = "pr_carkeys_bag_" .. bagMeta.barcode
-                    local stashItems = exports.ox_inventory:GetInventoryItems(stashId)
+                    local stashId = PRCarkeys.GetStashId(bagMeta.barcode)
+                    local stashItems = pr_lib.inventory.GetInventoryItems(stashId)
                     if stashItems then
                         for _, item in pairs(stashItems) do
                             if item and tempItems[item.name] then
-                                exports.ox_inventory:RemoveItem(stashId, item.name, item.count or 1, nil, item.slot)
+                                pr_lib.inventory.RemoveItem(stashId, item.name, item.count or 1, nil, item.slot)
                                 Debug("INFO", ("Bag cleanup: removido %s stash=%s slot=%s | src=%d"):format(
                                     tostring(item.name), tostring(stashId), tostring(item.slot), src))
                             end

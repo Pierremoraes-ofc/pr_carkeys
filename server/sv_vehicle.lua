@@ -10,6 +10,7 @@ VehiclesWithKeyInside = VehiclesWithKeyInside or {}
 local TempKeys = {}
 local MissingVehicleChecks = {}
 local RecentTempKeyGrants = {}
+local HotwireSessions = {}
 
 -- ================================================================
 --   HELPERS
@@ -19,9 +20,63 @@ local function sanitize(plate)
     return PRCarkeys.SanitizePlate(plate)
 end
 
+local function createVehicleSession(sessions, src, vehNetId, plate, duration)
+    local token = ("%s:%s:%s:%s"):format(src, vehNetId, GetGameTimer(), math.random(100000, 999999))
+    sessions[src] = {
+        token = token,
+        vehNetId = vehNetId,
+        plate = plate,
+        expires = GetGameTimer() + (duration or 20000),
+    }
+    return token
+end
+
+local function consumeVehicleSession(sessions, src, vehNetId, plate, token)
+    local session = sessions[src]
+    sessions[src] = nil
+
+    return session
+        and session.expires > GetGameTimer()
+        and session.vehNetId == vehNetId
+        and session.plate == plate
+        and session.token == token
+end
+
+local function isPlayerNearVehicle(src, vehicle, distance)
+    local ped = GetPlayerPed(src)
+    if ped == 0 or not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then return false end
+    return #(GetEntityCoords(ped) - GetEntityCoords(vehicle)) <= distance
+end
+
+local function registerTemporaryKeyInIgnition(src, citizenid, vehNetId, plate)
+    local existing = VehiclesWithKeyInside[vehNetId]
+    if existing then
+        if existing.plate ~= plate then return false, "different_key_registered" end
+        existing.citizenid = citizenid
+        existing.lastDriverSrc = src
+        existing.lastDriverCitizenid = citizenid
+    else
+        VehiclesWithKeyInside[vehNetId] = {
+            plate = plate,
+            barcode = PRCarkeys.GenerateBarcode(),
+            citizenid = citizenid,
+            lastDriverSrc = src,
+            lastDriverCitizenid = citizenid,
+            itemName = "carkey_temp",
+            fromStash = nil,
+            isCarjack = true,
+        }
+    end
+
+    if not TempKeys[citizenid] then TempKeys[citizenid] = {} end
+    TempKeys[citizenid][plate] = { kind = "vehicle" }
+    TriggerClientEvent("pr_carkeys:client:addTempKey", src, plate)
+    return true
+end
+
 local function hasTemporaryItemForPlate(src, plate)
     if ActiveInventory ~= "ox_inventory" then return false end
-    local slots = exports.ox_inventory:Search(src, "slots", "carkey_temp", { plate = plate })
+    local slots = pr_lib.inventory.Search(src, "slots", "carkey_temp", { plate = plate })
     return slots and #slots > 0
 end
 
@@ -75,7 +130,7 @@ local function playerHasAccess(src, citizenid, plate)
     if ActiveInventory == "ox_inventory" then
         -- 2a. Inventário direto
         for itemName, _ in pairs(Config.KeyTypes) do
-            local slots = exports.ox_inventory:GetSlotsWithItem(src, itemName, nil)
+            local slots = pr_lib.inventory.GetSlotsWithItem(src, itemName, nil)
             if slots then
                 for _, slot in pairs(slots) do
                     local meta = slot.metadata or {}
@@ -89,14 +144,14 @@ local function playerHasAccess(src, citizenid, plate)
 
         -- 2b. Bolsas
         for _, bagName in ipairs({ "carkey_bag", "carkey_bag_large" }) do
-            local bagSlots = exports.ox_inventory:GetSlotsWithItem(src, bagName, nil)
+            local bagSlots = pr_lib.inventory.GetSlotsWithItem(src, bagName, nil)
             if bagSlots then
                 for _, bagSlot in pairs(bagSlots) do
                     local bagMeta = bagSlot.metadata or {}
                     if bagMeta.barcode then
                         local stashId = "pr_carkeys_bag_" .. bagMeta.barcode
                         for itemName, _ in pairs(Config.KeyTypes) do
-                            local keySlots = exports.ox_inventory:Search(stashId, "slots", itemName, { plate = plate })
+                            local keySlots = pr_lib.inventory.Search(stashId, "slots", itemName, { plate = plate })
                             if keySlots and #keySlots > 0 then
                                 Debug("INFO", ("playerHasAccess: chave na bolsa | plate=%s | stash=%s"):format(plate, stashId))
                                 return true
@@ -140,7 +195,7 @@ local function findKeyItemByPlate(src, plate)
     if ActiveInventory == "ox_inventory" then
         -- 1. Inventário direto usando Search com match na metadata
         for itemName, _ in pairs(Config.KeyTypes) do
-            local slots = exports.ox_inventory:Search(src, "slots", itemName, { plate = plate })
+            local slots = pr_lib.inventory.Search(src, "slots", itemName, { plate = plate })
             if slots and #slots > 0 then
                 -- escolhe o primeiro slot com barcode válido (evita falso positivo quando meta está incompleta)
                 for _, s in ipairs(slots) do
@@ -156,7 +211,7 @@ local function findKeyItemByPlate(src, plate)
 
         -- 1b. Fallback robusto (metadata plate pode vir sem sanitize no item)
         for itemName, _ in pairs(Config.KeyTypes) do
-            local invSlots = exports.ox_inventory:GetSlotsWithItem(src, itemName, nil)
+            local invSlots = pr_lib.inventory.GetSlotsWithItem(src, itemName, nil)
             if invSlots then
                 for _, slot in pairs(invSlots) do
                     local meta = slot.metadata or {}
@@ -171,14 +226,14 @@ local function findKeyItemByPlate(src, plate)
 
         -- 2. Bolsas
         for _, bagName in ipairs({ "carkey_bag", "carkey_bag_large" }) do
-            local bagSlots = exports.ox_inventory:GetSlotsWithItem(src, bagName, nil)
+            local bagSlots = pr_lib.inventory.GetSlotsWithItem(src, bagName, nil)
             if bagSlots then
                 for _, bagSlot in pairs(bagSlots) do
                     local bagMeta = bagSlot.metadata or {}
                     if bagMeta.barcode then
                         local stashId = "pr_carkeys_bag_" .. bagMeta.barcode
                         for itemName, _ in pairs(Config.KeyTypes) do
-                            local keySlots = exports.ox_inventory:Search(stashId, "slots", itemName, { plate = plate })
+                            local keySlots = pr_lib.inventory.Search(stashId, "slots", itemName, { plate = plate })
                             if keySlots and #keySlots > 0 then
                                 for _, ks in ipairs(keySlots) do
                                     local meta = ks.metadata or {}
@@ -198,13 +253,13 @@ local function findKeyItemByPlate(src, plate)
 
         -- 2b. Fallback robusto para bolsas (scan completo do stash e sanitize da placa)
         for _, bagName in ipairs({ "carkey_bag", "carkey_bag_large" }) do
-            local bagSlots = exports.ox_inventory:GetSlotsWithItem(src, bagName, nil)
+            local bagSlots = pr_lib.inventory.GetSlotsWithItem(src, bagName, nil)
             if bagSlots then
                 for _, bagSlot in pairs(bagSlots) do
                     local bagMeta = bagSlot.metadata or {}
                     if bagMeta.barcode then
                         local stashId = "pr_carkeys_bag_" .. bagMeta.barcode
-                        local stashItems = exports.ox_inventory:GetInventoryItems(stashId)
+                        local stashItems = pr_lib.inventory.GetInventoryItems(stashId)
                         if stashItems then
                             for _, item in pairs(stashItems) do
                                 if item and Config.KeyTypes[item.name] then
@@ -262,24 +317,24 @@ local function removeKeyItemConfirmed(src, plate)
         -- Confirma no MESMO container de onde removemos (evita falso positivo se a chave
         -- existir só na bolsa e Search no player "principal" se comportar diferente)
         local invId = fromStash or src
-        local slots = exports.ox_inventory:Search(invId, "slots", itemName, { barcode = barcode })
+        local slots = pr_lib.inventory.Search(invId, "slots", itemName, { barcode = barcode })
         return slots and #slots > 0
     end
 
     local removed = false
 
     if fromStash then
-        removed = not not exports.ox_inventory:RemoveItem(fromStash, itemName, 1, nil, slot)
+        removed = not not pr_lib.inventory.RemoveItem(fromStash, itemName, 1, nil, slot)
     else
-        removed = not not exports.ox_inventory:RemoveItem(src, itemName, 1, nil, slot)
+        removed = not not pr_lib.inventory.RemoveItem(src, itemName, 1, nil, slot)
     end
 
     if not removed then
         Wait(150)
         if fromStash then
-            removed = not not exports.ox_inventory:RemoveItem(fromStash, itemName, 1, nil, slot)
+            removed = not not pr_lib.inventory.RemoveItem(fromStash, itemName, 1, nil, slot)
         else
-            removed = not not exports.ox_inventory:RemoveItem(src, itemName, 1, nil, slot)
+            removed = not not pr_lib.inventory.RemoveItem(src, itemName, 1, nil, slot)
         end
     end
 
@@ -321,16 +376,18 @@ RegisterNetEvent("pr_carkeys:server:setVehicleLockState", function(vehNetId, sta
 
     SetVehicleDoorsLocked(vehicle, state)
     Entity(vehicle).state:set("doorslockstate", state, true)
+    if state == 1 then
+        FreezeEntityPosition(vehicle, false)
+    end
 
     Debug("INFO", ("setVehicleLockState: src=%d | plate=%s | state=%d"):format(src, tostring(plate), state))
 end)
 
 -- Callback: valida se player realmente tem a chave no inventário AGORA
 -- Consultado pelo client ANTES de qualquer ação de lock/unlock
-lib.callback.register("pr_carkeys:server:validateKeyAccess", function(src, plate)
+pr_lib.callback.register("pr_carkeys:server:validateKeyAccess", function(src, plate)
     local citizenid = Bridge.framework.GetIdentifier(src)
     if not citizenid then return false end
-    if PRCarkeys.IsPlayerPolice(src) then return true end
     return playerHasAccess(src, citizenid, sanitize(plate))
 end)
 
@@ -349,7 +406,10 @@ RegisterNetEvent("pr_carkeys:server:validateDriverSeat", function(vehNetId, plat
     local vehicle = NetworkGetEntityFromNetworkId(vehNetId)
     if not vehicle or vehicle == 0 then return end
 
-    local hasAccess = PRCarkeys.IsPlayerPolice(src) or playerHasAccess(src, citizenid, plate)
+    local playerPed = GetPlayerPed(src)
+    if playerPed == 0 or GetPedInVehicleSeat(vehicle, -1) ~= playerPed then return end
+
+    local hasAccess = playerHasAccess(src, citizenid, plate)
 
     -- Verifica também se há chave no carro disponível para pegar
     local keyInCar = VehiclesWithKeyInside[vehNetId]
@@ -477,7 +537,7 @@ local function restoreDeletedVehicleKey(vehNetId, keyData)
         if ActiveInventory == "ox_inventory" and keyData.fromStash then
             local hasBag = false
             for _, bagName in ipairs({ "carkey_bag", "carkey_bag_large" }) do
-                local bagSlots = exports.ox_inventory:GetSlotsWithItem(targetSrc, bagName, nil)
+                local bagSlots = pr_lib.inventory.GetSlotsWithItem(targetSrc, bagName, nil)
                 if bagSlots then
                     for _, bagSlot in pairs(bagSlots) do
                         local bagMeta = bagSlot.metadata or {}
@@ -493,7 +553,7 @@ local function restoreDeletedVehicleKey(vehNetId, keyData)
             if hasBag then
                 local bagBarcode = keyData.fromStash:gsub("pr_carkeys_bag_", "")
                 local bagCfg = Config.Bags[(keyData.fromBagItem or "")] or Config.Bags.carkey_bag or { label = "Bolsa de Chaves", slots = 10, weight = 5000 }
-                exports.ox_inventory:RegisterStash(
+                pr_lib.inventory.RegisterStash(
                     keyData.fromStash,
                     bagCfg.label .. " | " .. bagBarcode,
                     bagCfg.slots,
@@ -501,7 +561,7 @@ local function restoreDeletedVehicleKey(vehNetId, keyData)
                     false
                 )
                 Wait(100)
-                added = exports.ox_inventory:AddItem(keyData.fromStash, keyData.itemName, 1, metadata) == true
+                added = pr_lib.inventory.AddItem(keyData.fromStash, keyData.itemName, 1, metadata) == true
             end
         end
 
@@ -732,7 +792,7 @@ RegisterNetEvent("pr_carkeys:server:returnKeyFromVehicle", function(vehNetId, pl
     if keyData.fromStash then
         -- Verifica se quem desligou possui a bolsa da qual a chave saiu
         local bagName = nil
-        local bagSlots = exports.ox_inventory:GetSlotsWithItem(src, "carkey_bag", nil)
+        local bagSlots = pr_lib.inventory.GetSlotsWithItem(src, "carkey_bag", nil)
         if bagSlots then
             for _, bagSlot in pairs(bagSlots) do
                 local bagMeta = bagSlot.metadata or {}
@@ -743,7 +803,7 @@ RegisterNetEvent("pr_carkeys:server:returnKeyFromVehicle", function(vehNetId, pl
             end
         end
         if not bagName then
-            local bagSlotsLarge = exports.ox_inventory:GetSlotsWithItem(src, "carkey_bag_large", nil)
+            local bagSlotsLarge = pr_lib.inventory.GetSlotsWithItem(src, "carkey_bag_large", nil)
             if bagSlotsLarge then
                 for _, bagSlot in pairs(bagSlotsLarge) do
                     local bagMeta = bagSlot.metadata or {}
@@ -762,7 +822,7 @@ RegisterNetEvent("pr_carkeys:server:returnKeyFromVehicle", function(vehNetId, pl
                 -- Usa a configuração correta da bolsa (salva ao remover), com fallback seguro
                 local bagCfg = Config.Bags[(keyData.fromBagItem or "")] or Config.Bags.carkey_bag or { label = "Bolsa de Chaves", slots = 10, weight = 5000 }
                 -- RegisterStash garante que a stash está carregada e aceita items
-                exports.ox_inventory:RegisterStash(
+                pr_lib.inventory.RegisterStash(
                     keyData.fromStash,
                     bagCfg.label .. " | " .. bagBarcode,
                     bagCfg.slots,
@@ -772,16 +832,16 @@ RegisterNetEvent("pr_carkeys:server:returnKeyFromVehicle", function(vehNetId, pl
                 -- Pequeno wait para o ox_inventory processar o RegisterStash
                 Wait(100)
             end
-            added = exports.ox_inventory:AddItem(keyData.fromStash, keyData.itemName, 1, metadata)
+            added = pr_lib.inventory.AddItem(keyData.fromStash, keyData.itemName, 1, metadata)
             Debug("INFO", ("returnKeyFromVehicle: quem desligou tem a bolsa | stash=%s | src=%d"):format(keyData.fromStash, src))
         else
             -- Quem desligou não tem a bolsa → devolve ao inventário direto
-            added = exports.ox_inventory:AddItem(src, keyData.itemName, 1, metadata)
+            added = pr_lib.inventory.AddItem(src, keyData.itemName, 1, metadata)
             Debug("INFO", ("returnKeyFromVehicle: bolsa nao encontrada com src=%d → inventario direto"):format(src))
         end
     else
         -- Chave veio do inventário direto → devolve ao inventário de quem desligou
-        added = exports.ox_inventory:AddItem(src, keyData.itemName, 1, metadata)
+        added = pr_lib.inventory.AddItem(src, keyData.itemName, 1, metadata)
         Debug("INFO", ("returnKeyFromVehicle: devolvida ao inventario | src=%d"):format(src))
     end
 
@@ -831,12 +891,12 @@ end
 
 local function removeTemporaryItemFromOxInventory(inventoryId, plate)
     for _, itemName in ipairs(getTemporaryKeyItems()) do
-        local slots = exports.ox_inventory:GetSlotsWithItem(inventoryId, itemName, nil)
+        local slots = pr_lib.inventory.GetSlotsWithItem(inventoryId, itemName, nil)
         if slots then
             for _, slot in pairs(slots) do
                 local meta = slot.metadata or {}
                 if meta.plate and sanitize(meta.plate) == plate then
-                    return not not exports.ox_inventory:RemoveItem(inventoryId, itemName, 1, nil, slot.slot)
+                    return not not pr_lib.inventory.RemoveItem(inventoryId, itemName, 1, nil, slot.slot)
                 end
             end
         end
@@ -854,7 +914,7 @@ function PRCarkeys.RemoveTempKeyItem(src, plate)
 
         if not removed then
             for _, bagName in ipairs({ "carkey_bag", "carkey_bag_large" }) do
-                local bagSlots = exports.ox_inventory:GetSlotsWithItem(src, bagName, nil)
+                local bagSlots = pr_lib.inventory.GetSlotsWithItem(src, bagName, nil)
                 if bagSlots then
                     for _, bagSlot in pairs(bagSlots) do
                         local bagMeta = bagSlot.metadata or {}
@@ -1030,33 +1090,7 @@ end)
 -- ================================================================
 
 function PRCarkeys.IsPlayerPolice(src)
-    if not Config.Police or not Config.Police.enabled then return false end
-    local citizenid = Bridge.framework.GetIdentifier(src)
-    if not citizenid then return false end
-    local fw = PRCarkeys.ActiveResource
-    if fw == "qb-core" or fw == "qbx-core" or fw == "qbx_core" then
-        local Player = Bridge.framework.GetPlayer(src)
-        if not Player then return false end
-        local jobName = Player.PlayerData.job and Player.PlayerData.job.name
-        for _, job in ipairs(Config.Police.jobs) do
-            if jobName == job then return true end
-        end
-    elseif fw == "es_extended" then
-        local xPlayer = Bridge.framework.GetPlayer(src)
-        if not xPlayer then return false end
-        local jobName = xPlayer.getJob and xPlayer.getJob().name
-        for _, job in ipairs(Config.Police.jobs) do
-            if jobName == job then return true end
-        end
-    elseif fw == "ox_core" then
-        local player = Bridge.framework.GetPlayer(src)
-        if not player then return false end
-        local groups = player.getGroups and player.getGroups() or {}
-        for _, job in ipairs(Config.Police.jobs) do
-            if groups[job] then return true end
-        end
-    end
-    return false
+    return Bridge.framework.isPolice(src) == true
 end
 
 -- ================================================================
@@ -1064,8 +1098,16 @@ end
 -- ================================================================
 
 RegisterNetEvent("qb-vehiclekeys:server:setVehLockState", function(vehNetId, state)
+    local src = source
+    local citizenid = Bridge.framework.GetIdentifier(src)
+    if not citizenid or (state ~= 1 and state ~= 2) then return end
+
     local vehicle = NetworkGetEntityFromNetworkId(vehNetId)
     if not vehicle or vehicle == 0 then return end
+
+    local plate = sanitize(GetVehicleNumberPlateText(vehicle))
+    if not PRCarkeys.IsPlayerPolice(src) and not playerHasAccess(src, citizenid, plate) then return end
+
     SetVehicleDoorsLocked(vehicle, state)
     Entity(vehicle).state:set("doorslockstate", state, true)
 end)
@@ -1078,8 +1120,34 @@ RegisterNetEvent("mm_carkeys:server:acquiretempvehiclekeys", function(plate)
     PRCarkeys.GiveTempKey(source, plate)
 end)
 
+pr_lib.callback.register("pr_carkeys:server:requestHotwireSession", function(src, vehNetId, plate)
+    local citizenid = Bridge.framework.GetIdentifier(src)
+    vehNetId = tonumber(vehNetId)
+    if not citizenid or not vehNetId then return false end
+
+    local vehicle = NetworkGetEntityFromNetworkId(vehNetId)
+    if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then return false end
+
+    local playerPed = GetPlayerPed(src)
+    if playerPed == 0 or GetPedInVehicleSeat(vehicle, -1) ~= playerPed then return false end
+    if PRCarkeys.IsVehicleBlacklisted(vehicle) then return false end
+
+    local vehiclePlate = sanitize(GetVehicleNumberPlateText(vehicle))
+    if sanitize(plate) ~= vehiclePlate then return false end
+
+    if playerHasAccess(src, citizenid, vehiclePlate) then
+        return { hasAccess = true, plate = vehiclePlate }
+    end
+
+    return {
+        hasAccess = false,
+        plate = vehiclePlate,
+        token = createVehicleSession(HotwireSessions, src, vehNetId, vehiclePlate, 120000),
+    }
+end)
+
 --- Hotwire / minigame (client): valida motorista+veículo e concede TempKey via export interno.
-RegisterNetEvent("pr_carkeys:server:grantTemporaryVehicleAccess", function(vehNetId, plate)
+RegisterNetEvent("pr_carkeys:server:grantTemporaryVehicleAccess", function(vehNetId, plate, hotwireToken)
     local src = source
     local citizenid = Bridge.framework.GetIdentifier(src)
     if not citizenid then
@@ -1127,15 +1195,28 @@ RegisterNetEvent("pr_carkeys:server:grantTemporaryVehicleAccess", function(vehNe
         return
     end
 
+    if GetPedInVehicleSeat(vehicle, -1) ~= ped then
+        TriggerClientEvent("pr_carkeys:client:grantTempAccessResult", src, false, "not_driver")
+        return
+    end
+
+    if not consumeVehicleSession(HotwireSessions, src, vehNetId, finalPlate, hotwireToken) then
+        Debug("WARNING", ("grantTemporaryVehicleAccess: sessao hotwire invalida | src=%d | plate=%s"):format(src, finalPlate))
+        TriggerClientEvent("pr_carkeys:client:grantTempAccessResult", src, false, "invalid_hotwire_session")
+        return
+    end
+
     local grantKey = ("%s:%s"):format(tostring(src), finalPlate)
     local nowMs = GetGameTimer()
     local lastGrant = RecentTempKeyGrants[grantKey]
     if lastGrant and (nowMs - lastGrant) < 10000 then
+        TriggerClientEvent("pr_carkeys:client:addTempKey", src, finalPlate)
         TriggerClientEvent("pr_carkeys:client:grantTempAccessResult", src, true, "already_granted")
         return
     end
     if hasTemporaryItemForPlate(src, finalPlate) then
         RecentTempKeyGrants[grantKey] = nowMs
+        TriggerClientEvent("pr_carkeys:client:addTempKey", src, finalPlate)
         TriggerClientEvent("pr_carkeys:client:grantTempAccessResult", src, true, "already_has_item")
         return
     end
@@ -1153,10 +1234,57 @@ RegisterNetEvent("pr_carkeys:server:grantTemporaryVehicleAccess", function(vehNe
     RecentTempKeyGrants[grantKey] = nowMs
     Debug("SUCCESS", ("grantTemporaryVehicleAccess: carkey_temp entregue | src=%d | plate=%s | barcode=%s"):format(
         src, finalPlate, tostring(barcode)))
+    TriggerClientEvent("pr_carkeys:client:addTempKey", src, finalPlate)
     TriggerClientEvent("pr_carkeys:client:grantTempAccessResult", src, true, tostring(barcode))
 end)
 
--- Entrega carkey_temp (item) por proximidade — usado quando o NPC foge e o player o mata e "pega a chave".
+pr_lib.callback.register("pr_carkeys:server:registerPoliceIgnitionKey", function(src, vehNetId, plate)
+    vehNetId = tonumber(vehNetId)
+    if not vehNetId or not PRCarkeys.IsPlayerPolice(src) then return false, "not_police" end
+
+    local vehicle = NetworkGetEntityFromNetworkId(vehNetId)
+    if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then return false, "invalid_vehicle" end
+    if not isPlayerNearVehicle(src, vehicle, 35.0) then return false, "too_far" end
+
+    local vehiclePlate = sanitize(GetVehicleNumberPlateText(vehicle))
+    if sanitize(plate) ~= vehiclePlate then return false, "plate_mismatch" end
+
+    local driver = GetPedInVehicleSeat(vehicle, -1)
+    if driver == 0 then return false, "no_npc_driver" end
+    for _, playerId in ipairs(GetPlayers()) do
+        if GetPlayerPed(tonumber(playerId)) == driver then return false, "player_driver" end
+    end
+
+    local citizenid = Bridge.framework.GetIdentifier(src)
+    if not citizenid then return false, "no_citizenid" end
+
+    local success, reason = registerTemporaryKeyInIgnition(src, citizenid, vehNetId, vehiclePlate)
+    if success then
+        Debug("SUCCESS", ("registerPoliceIgnitionKey: chave na ignicao | src=%d | plate=%s"):format(src, vehiclePlate))
+    end
+    return success, reason
+end)
+
+RegisterNetEvent("pr_carkeys:server:secureParkedVehicle", function(vehNetId)
+    local src = source
+    vehNetId = tonumber(vehNetId)
+    if not vehNetId then return end
+
+    local vehicle = NetworkGetEntityFromNetworkId(vehNetId)
+    if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then return end
+    if not isPlayerNearVehicle(src, vehicle, 12.0) then return end
+    if GetPedInVehicleSeat(vehicle, -1) ~= 0 or GetIsVehicleEngineRunning(vehicle) then return end
+    local lockStatus = GetVehicleDoorLockStatus(vehicle)
+    if PRCarkeys.IsVehicleBlacklisted(vehicle) or (lockStatus ~= 0 and lockStatus ~= 1) then return end
+
+    local citizenid = Bridge.framework.GetIdentifier(src)
+    local vehiclePlate = sanitize(GetVehicleNumberPlateText(vehicle))
+    if not citizenid or playerHasAccess(src, citizenid, vehiclePlate) then return end
+
+    SetVehicleDoorsLocked(vehicle, 7)
+    Entity(vehicle).state:set("doorslockstate", 7, true)
+end)
+
 RegisterNetEvent("pr_carkeys:server:grantTemporaryKeyItemNearbyVehicle", function(vehNetId, plate)
     local src = source
     local citizenid = Bridge.framework.GetIdentifier(src)
@@ -1235,10 +1363,19 @@ exports("RemoveKeysForOwnerPlate", function(citizenid, plate, keyType)
     return PRCarkeys.RemoveKeysForOwnerPlate(citizenid, plate, keyType)
 end)
 exports("IsPlayerPolice", function(src) return PRCarkeys.IsPlayerPolice(src) end)
+exports("HasVehicleAccess", function(src, plate)
+    local citizenid = Bridge.framework.GetIdentifier(src)
+    if not citizenid then return false end
+    if PRCarkeys.IsPlayerPolice(src) then return true end
+    return playerHasAccess(src, citizenid, sanitize(plate))
+end)
 exports("SetLockState",   function(vehicle, state)
     if not vehicle or vehicle == 0 then return end
     SetVehicleDoorsLocked(vehicle, state)
     Entity(vehicle).state:set("doorslockstate", state, true)
+    if state == 1 then
+        FreezeEntityPosition(vehicle, false)
+    end
 end)
 exports("GiveKeys", function(src, vehicle)
     local plate = type(vehicle) == "number" and vehicle > 0
@@ -1272,7 +1409,7 @@ exports("GetKeys", function(src)
     -- 3. Inventory items
     if ActiveInventory == "ox_inventory" then
         for itemName, _ in pairs(Config.KeyTypes) do
-            local slots = exports.ox_inventory:GetSlotsWithItem(src, itemName, nil)
+            local slots = pr_lib.inventory.GetSlotsWithItem(src, itemName, nil)
             if slots then
                 for _, slot in pairs(slots) do
                     local meta = slot.metadata or {}
@@ -1285,14 +1422,14 @@ exports("GetKeys", function(src)
 
         -- Bolsas
         for _, bagName in ipairs({ "carkey_bag", "carkey_bag_large" }) do
-            local bagSlots = exports.ox_inventory:GetSlotsWithItem(src, bagName, nil)
+            local bagSlots = pr_lib.inventory.GetSlotsWithItem(src, bagName, nil)
             if bagSlots then
                 for _, bagSlot in pairs(bagSlots) do
                     local bagMeta = bagSlot.metadata or {}
                     if bagMeta.barcode then
                         local stashId = "pr_carkeys_bag_" .. bagMeta.barcode
                         for itemName, _ in pairs(Config.KeyTypes) do
-                            local keySlots = exports.ox_inventory:GetInventoryItems(stashId)
+                            local keySlots = pr_lib.inventory.GetInventoryItems(stashId)
                             if keySlots then
                                 for _, kItem in pairs(keySlots) do
                                     if kItem and kItem.name == itemName then
@@ -1334,21 +1471,21 @@ end)
 --   BUSCA CHAVES NAS BOLSAS DO PLAYER (server-side)
 --   Client não consegue acessar stash diretamente
 -- ================================================================
-lib.callback.register("pr_carkeys:server:getKeysInBags", function(src)
+pr_lib.callback.register("pr_carkeys:server:getKeysInBags", function(src)
     if not Bridge.framework.GetIdentifier(src) then return {} end
 
     local result = {}
     if ActiveInventory ~= "ox_inventory" then return result end
 
     for _, bagName in ipairs({ "carkey_bag", "carkey_bag_large" }) do
-        local bagSlots = exports.ox_inventory:GetSlotsWithItem(src, bagName, nil)
+        local bagSlots = pr_lib.inventory.GetSlotsWithItem(src, bagName, nil)
         if bagSlots then
             for _, bagSlot in pairs(bagSlots) do
                 local bagMeta = bagSlot.metadata or {}
                 if bagMeta.barcode then
                     local stashId = "pr_carkeys_bag_" .. bagMeta.barcode
                     for itemName, _ in pairs(Config.KeyTypes) do
-                        local keySlots = exports.ox_inventory:GetInventoryItems(stashId)
+                        local keySlots = pr_lib.inventory.GetInventoryItems(stashId)
                         if keySlots then
                             for _, kItem in pairs(keySlots) do
                                 if kItem and kItem.name == itemName then
@@ -1375,12 +1512,20 @@ end)
 --   CARJACK — Registra chave na ignição do veículo
 --   Player só recebe carkey_temp quando desligar o motor
 -- ================================================================
-RegisterNetEvent("pr_carkeys:server:carjackRegisterKey", function(plate, vehNetId)
+RegisterNetEvent("pr_carkeys:server:carjackRegisterKey", function(vehNetId, plate)
     local src       = source
     local citizenid = Bridge.framework.GetIdentifier(src)
+    vehNetId = tonumber(vehNetId)
     if not citizenid or not plate or not vehNetId then return end
 
     plate = sanitize(plate)
+
+    local vehicle = NetworkGetEntityFromNetworkId(vehNetId)
+    if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then return end
+    if not isPlayerNearVehicle(src, vehicle, 12.0) or PRCarkeys.IsVehicleBlacklisted(vehicle) then return end
+
+    local vehiclePlate = sanitize(GetVehicleNumberPlateText(vehicle))
+    if vehiclePlate ~= plate or VehiclesWithKeyInside[vehNetId] then return end
 
     -- Gera barcode único para esta chave temporária
     local barcode = PRCarkeys.GenerateBarcode()
@@ -1390,6 +1535,8 @@ RegisterNetEvent("pr_carkeys:server:carjackRegisterKey", function(plate, vehNetI
         plate     = plate,
         barcode   = barcode,
         citizenid = citizenid,
+        lastDriverSrc = src,
+        lastDriverCitizenid = citizenid,
         itemName  = "carkey_temp",
         fromStash = nil,
         isCarjack = true,  -- marca para saber que não veio do inventário

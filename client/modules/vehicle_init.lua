@@ -7,6 +7,36 @@ local VehicleState = require 'client.modules.vehicle_state'
 local VehicleLock  = require 'client.modules.vehicle_lock'
 local KeyInVehicle = require 'client.modules.key_in_vehicle'
 
+local function snapshotTableValues(source)
+    local values = {}
+    if type(source) ~= "table" then return values end
+
+    local lastKey = nil
+    while true do
+        local ok, key, value = pcall(next, source, lastKey)
+        if not ok or key == nil then break end
+        values[#values + 1] = value
+        lastKey = key
+    end
+
+    return values
+end
+
+local function countTableEntries(source)
+    local count = 0
+    if type(source) ~= "table" then return count end
+
+    local lastKey = nil
+    while true do
+        local ok, key = pcall(next, source, lastKey)
+        if not ok or key == nil then break end
+        count = count + 1
+        lastKey = key
+    end
+
+    return count
+end
+
 local function clearDriverHintUI()
     if VehicleState.showHotwireHint then
         lib.hideTextUI()
@@ -26,7 +56,9 @@ end)
 -- ----------------------------------------------------------------
 local function fetchAllKeyDbData()
     local barcodes = {}
-    for _, data in pairs(VehicleState.permanentKeys) do
+    local keys = snapshotTableValues(VehicleState.permanentKeys)
+    for i = 1, #keys do
+        local data = keys[i]
         if data.barcode then
             barcodes[#barcodes+1] = data.barcode
         end
@@ -42,7 +74,7 @@ local function fetchKeysInBags()
     if ActiveInventory ~= "ox_inventory" then return end
     -- Pequeno wait para garantir que o servidor registrou o callback
     Wait(500)
-    local bagKeys = lib.callback.await("pr_carkeys:server:getKeysInBags", false)
+    local bagKeys = pr_lib.callback.await("pr_carkeys:server:getKeysInBags", false)
     if not bagKeys then return end
     for _, item in ipairs(bagKeys) do
         local meta = item.metadata or {}
@@ -61,7 +93,7 @@ local function fetchKeysInBags()
         end
     end
     Debug("INFO", ("[VehicleState] Chaves das bolsas carregadas | total permanentes: %d"):format(
-        (function() local c=0; for _ in pairs(VehicleState.permanentKeys) do c=c+1 end; return c end)()
+        countTableEntries(VehicleState.permanentKeys)
     ))
 end
 
@@ -76,6 +108,7 @@ lib.onCache("vehicle", function(vehicle)
         VehicleState.isInDriverSeat  = (GetPedInVehicleSeat(vehicle, -1) == cache.ped)
         VehicleState.hasKey          = VehicleState:HasKey(plate)
         VehicleState.isEngineRunning = GetIsVehicleEngineRunning(vehicle)
+        VehicleState.hotwireToken    = nil
 
         -- Se entrou no banco do motorista sem chave: verifica se há chave no carro
         if not VehicleState.hasKey and VehicleState.isInDriverSeat then
@@ -92,11 +125,24 @@ lib.onCache("vehicle", function(vehicle)
         end
     else
         -- Saiu do veículo
-        local leftVehicle = cache.vehicle
+        local leftVehicle = VehicleState.currentVehicle
+        local leftPlate = VehicleState.currentPlate
         if leftVehicle and leftVehicle ~= 0 then
+            local forcedExit = IsPedRagdoll(cache.ped) or IsEntityDead(cache.ped)
+                or GetEntitySpeed(leftVehicle) > 10.0
+
+            if forcedExit and DoesEntityExist(leftVehicle) then
+                NetworkRequestControlOfEntity(leftVehicle)
+                SetVehicleEngineOn(leftVehicle, false, true, true)
+                SetVehicleHandbrake(leftVehicle, true)
+                VehicleState.isEngineRunning = false
+                PRCarkeys.OnEngineStopped(leftVehicle, leftPlate)
+                Debug("INFO", ("[VehicleExit] forced exit; engine stopped | plate=%s"):format(tostring(leftPlate)))
+            end
+
             -- keepVehicleEngineOn: mantém motor ligado ao sair do carro
             -- Usa parâmetro 'instantly=true, otherwise=false' para não religar automaticamente
-            if Config.KeyInVehicle.keepVehicleEngineOn
+            if not forcedExit and Config.KeyInVehicle.keepVehicleEngineOn
             and VehicleState.isInDriverSeat
             and VehicleState.isEngineRunning then
                 -- 'true, true, false' = ligar, instantly, sem forçar novo estado
@@ -111,6 +157,7 @@ lib.onCache("vehicle", function(vehicle)
         VehicleState.isInDriverSeat  = false
         VehicleState.isEngineRunning = false
         VehicleState.hasKey          = false
+        VehicleState.hotwireToken    = nil
 
         clearDriverHintUI()
     end
@@ -152,6 +199,7 @@ RegisterNetEvent("pr_carkeys:client:driverSeatValidation", function(result)
 
     if result.hasAccess then
         VehicleState.hasKey = true
+        VehicleState.hotwireToken = nil
         clearDriverHintUI()
 
         -- Acesso confirmado
@@ -171,6 +219,7 @@ RegisterNetEvent("pr_carkeys:client:driverSeatValidation", function(result)
             Debug("INFO", ("[driverSeatValidation] Motor mantido — tem TempKey"))
         end
     elseif result.keyAvailable then
+        VehicleState.hotwireToken = nil
         -- Há chave no carro disponível para pegar
         if not VehicleState.showHotwireHint then
             lib.showTextUI(Config.KeyInVehicle and Config.KeyInVehicle.pickupLabel or "Chave no carro...", {
@@ -181,6 +230,7 @@ RegisterNetEvent("pr_carkeys:client:driverSeatValidation", function(result)
             VehicleState.textUiMode = "pickup"
         end
     else
+        VehicleState.hotwireToken = result.hotwireToken
         -- Sem chave — mantém motor desligado e mostra hint de hotwire
         SetVehicleEngineOn(vehicle, false, true, true)
         if not VehicleState.showHotwireHint then
@@ -314,7 +364,7 @@ CreateThread(function()
                     VehicleState.isEngineRunning = false
                     VehicleState.hasKey = false
                 else
-                    local hasAccess = lib.callback.await("pr_carkeys:server:validateKeyAccess", false, plate)
+                    local hasAccess = pr_lib.callback.await("pr_carkeys:server:validateKeyAccess", false, plate)
                     if not hasAccess then
                         SetVehicleEngineOn(vehicle, false, true, true)
                         VehicleState.isEngineRunning = false
@@ -383,7 +433,7 @@ RegisterNetEvent("pr_carkeys:client:keyPickedUp", function(plate)
 end)
 
 -- ----------------------------------------------------------------
--- Receber chave temp (hotwire, lockpick, carjack)
+-- Receber chave temp (hotwire, carjack, confisco policial)
 -- ----------------------------------------------------------------
 RegisterNetEvent("pr_carkeys:client:addTempKey", function(plate)
     plate = PRCarkeys.SanitizePlate(plate)
@@ -633,6 +683,41 @@ end)
 -- ----------------------------------------------------------------
 local hotwireBusy = false
 
+local function showHotwireHint()
+    if cache.seat ~= -1 or VehicleState.currentVehicle == 0 or VehicleState.hasKey then return end
+
+    lib.showTextUI(Config.Hotwire.hintText or "[H] Ligação direta", {
+        position = "right-center",
+        icon     = "bolt",
+    })
+    VehicleState.showHotwireHint = true
+    VehicleState.textUiMode = "hotwire"
+end
+
+RegisterNetEvent("pr_carkeys:client:grantTempAccessResult", function(success, reason)
+    hotwireBusy = false
+    VehicleState.hotwireToken = nil
+
+    if success then
+        VehicleState.hasKey = true
+        clearDriverHintUI()
+        PRCarkeys.Notify(Config.Hotwire.notifySuccess or {
+            title       = "Ligação direta",
+            description = "Acesso temporário concedido a este veículo.",
+            type        = "success",
+        })
+        return
+    end
+
+    Debug("WARNING", ("[Hotwire] acesso recusado pelo servidor | reason=%s"):format(tostring(reason)))
+    PRCarkeys.Notify({
+        title       = "Ligação direta",
+        description = "Não foi possível validar este veículo. Tente novamente.",
+        type        = "error",
+    })
+    showHotwireHint()
+end)
+
 local function tryHotwireMinigame()
     if not Config.Hotwire or not Config.Hotwire.enabled then return end
     if hotwireBusy then return end
@@ -650,32 +735,80 @@ local function tryHotwireMinigame()
         lib.hideTextUI()
     end
 
-    local mode = (Config.Hotwire.minigameMode == "carjack") and "carjack" or "parked"
-    local success = Bridge.minigame and Bridge.minigame.Start(mode) or false
+    local netId = NetworkGetNetworkIdFromEntity(vehicle)
+    local session = pr_lib.callback.await(
+        "pr_carkeys:server:requestHotwireSession",
+        false,
+        netId,
+        plate
+    )
 
-    hotwireBusy = false
-
-    if cache.seat ~= -1 or VehicleState.currentVehicle ~= vehicle or VehicleState.hasKey then return end
-
-    if success then
-        local netId = NetworkGetNetworkIdFromEntity(vehicle)
-        TriggerServerEvent("pr_carkeys:server:grantTemporaryVehicleAccess", netId, plate)
-        PRCarkeys.Notify(Config.Hotwire.notifySuccess or {
+    if not session then
+        hotwireBusy = false
+        PRCarkeys.Notify({
             title       = "Ligação direta",
-            description = "Acesso temporário concedido a este veículo.",
-            type        = "success",
+            description = "Não foi possível iniciar neste veículo.",
+            type        = "error",
         })
-    else
-        local failMsg = Config.Hotwire.notifyFail or Config.Notify.noPermission
-        PRCarkeys.Notify(failMsg)
-        if VehicleState.textUiMode == "hotwire" and not VehicleState.hasKey then
-            lib.showTextUI(Config.Hotwire.hintText or "[H] Ligação direta", {
-                position = "right-center",
-                icon     = "bolt",
-            })
-            VehicleState.showHotwireHint = true
-        end
+        showHotwireHint()
+        return
     end
+
+    if session.hasAccess then
+        hotwireBusy = false
+        VehicleState.hasKey = true
+        VehicleState.hotwireToken = nil
+        clearDriverHintUI()
+        return
+    end
+
+    VehicleState.hotwireToken = session.token
+    local mode = (Config.Hotwire.minigameMode == "carjack") and "carjack" or "parked"
+    local minigameOk, success = pcall(function()
+        return Bridge.minigame and Bridge.minigame.Start(mode) or false
+    end)
+
+    if cache.seat ~= -1 or VehicleState.currentVehicle ~= vehicle or VehicleState.hasKey then
+        hotwireBusy = false
+        VehicleState.hotwireToken = nil
+        return
+    end
+
+    if not minigameOk then
+        hotwireBusy = false
+        VehicleState.hotwireToken = nil
+        Debug("ERROR", ("[Hotwire] falha ao iniciar minigame | error=%s"):format(tostring(success)))
+        PRCarkeys.Notify({
+            title       = "Ligação direta",
+            description = "O minigame está indisponível no momento.",
+            type        = "error",
+        })
+        showHotwireHint()
+        return
+    end
+
+    if not success then
+        hotwireBusy = false
+        VehicleState.hotwireToken = nil
+        PRCarkeys.Notify(Config.Hotwire.notifyFail or {
+            title       = "Ligação direta",
+            description = "A ligação direta falhou.",
+            type        = "error",
+        })
+        showHotwireHint()
+        return
+    end
+
+    TriggerServerEvent("pr_carkeys:server:grantTemporaryVehicleAccess", netId, plate, session.token)
+
+    CreateThread(function()
+        Wait(10000)
+        if hotwireBusy and VehicleState.hotwireToken == session.token then
+            hotwireBusy = false
+            VehicleState.hotwireToken = nil
+            showHotwireHint()
+        end
+    end)
 end
 
 RegisterCommand("pr_carkeys_hotwire", function()
@@ -688,3 +821,42 @@ RegisterKeyMapping(
     "keyboard",
     (Config.Hotwire and Config.Hotwire.hotwireKey) or "H"
 )
+
+-- ----------------------------------------------------------------
+-- Veiculos estacionados sem chave usam o arrombamento nativo do GTA:
+-- segurar F quebra o vidro e abre a porta. A ignicao continua protegida
+-- pelo hotwire acima, disponivel apenas no banco do motorista.
+-- ----------------------------------------------------------------
+local parkedVehicleLockRequests = {}
+
+CreateThread(function()
+    while true do
+        Wait(500)
+
+        if cache.vehicle then goto continue end
+
+        local vehicle = pr_lib.framework.GetClosestVehicle and pr_lib.framework.GetClosestVehicle() or nil
+        if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then goto continue end
+
+        local distance = #(GetEntityCoords(cache.ped) - GetEntityCoords(vehicle))
+        if distance > 4.0
+            or PRCarkeys.IsVehicleBlacklisted(vehicle)
+            or GetPedInVehicleSeat(vehicle, -1) ~= 0
+            or GetIsVehicleEngineRunning(vehicle) then goto continue end
+
+        local plate = PRCarkeys.SanitizePlate(GetVehicleNumberPlateText(vehicle))
+        if VehicleState:HasKey(plate) then goto continue end
+
+        local lockStatus = GetVehicleDoorLockStatus(vehicle)
+        if lockStatus == 0 or lockStatus == 1 then
+            local netId = NetworkGetNetworkIdFromEntity(vehicle)
+            local now = GetGameTimer()
+            if (parkedVehicleLockRequests[netId] or 0) <= now then
+                parkedVehicleLockRequests[netId] = now + 5000
+                TriggerServerEvent("pr_carkeys:server:secureParkedVehicle", netId)
+            end
+        end
+
+        ::continue::
+    end
+end)

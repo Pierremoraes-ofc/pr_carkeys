@@ -18,6 +18,7 @@ dependencies {
 }
 
 shared_scripts {
+    '@pr_bridge/init.lua',
     'config/config.lua',
     'shared/main.lua',
     'shared/bridge.lua',

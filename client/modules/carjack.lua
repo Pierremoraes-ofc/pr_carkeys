@@ -15,8 +15,6 @@ local currentVehicle   = nil
 local textUIVisible    = false
 local handsUpPedd      = false
 local handsUpActive    = false
-local pendingGrantTemp = false
-local pendingGrantOk   = false
 
 -- NPC fugiu com a chave: permite matar e "pegar" a chave
 local fleeingPed       = nil
@@ -197,14 +195,6 @@ RegisterNetEvent("pr_carkeys:client:carjackLootKeyResult", function(success, dat
     end
 end)
 
-RegisterNetEvent("pr_carkeys:client:grantTempAccessResult", function(success, data)
-    if success then
-        pendingGrantOk = true
-    else
-        cjDebug("WARNING", ("grant temp access falhou | reason=%s"):format(tostring(data)))
-    end
-end)
-
 -- ----------------------------------------------------------------
 -- Mantém motor ligado em loop por 'duration' ms
 -- ----------------------------------------------------------------
@@ -340,11 +330,13 @@ end
 -- ----------------------------------------------------------------
 -- NPC corre com medo após sair do veículo
 -- ----------------------------------------------------------------
-local function runAwayInFear(ped)
+local function runAwayInFear(ped, immediate)
     if not DoesEntityExist(ped) then return end
     enableActionsPed(ped)
-    TaskCower(ped, 1500)
-    Wait(1500)
+    if not immediate then
+        TaskCower(ped, 1500)
+        Wait(1500)
+    end
     if DoesEntityExist(ped) then
         SetPedFleeAttributes(ped, 0, true)
         TaskSmartFleePed(ped, cache.ped, 200.0, 30000, false, false)
@@ -422,7 +414,23 @@ end
 -- ----------------------------------------------------------------
 --   CONFISCO POLICIAL
 -- ----------------------------------------------------------------
-local function confiscateVehicle(ped, vehicle)
+local function registerPoliceVehicleKeyInIgnition(vehicle)
+    if not DoesEntityExist(vehicle) then return end
+
+    local vehNetId = NetworkGetNetworkIdFromEntity(vehicle)
+    local plate = PRCarkeys.SanitizePlate(GetVehicleNumberPlateText(vehicle))
+    local success, reason = pr_lib.callback.await(
+        "pr_carkeys:server:registerPoliceIgnitionKey",
+        false,
+        vehNetId,
+        plate
+    )
+    if not success then
+        cjDebug("WARNING", ("chave policial recusada | reason=%s"):format(tostring(reason)))
+    end
+end
+
+local function confiscateVehicle(ped, vehicle, fleeImmediately)
     if isConfiscating then return end
     isConfiscating = true
     handsUpActive  = false  -- para o loop de warp antes de sair
@@ -435,11 +443,16 @@ local function confiscateVehicle(ped, vehicle)
         return
     end
 
+    registerPoliceVehicleKeyInIgnition(vehicle)
     CreateThread(function() keepEngineOn(vehicle, 10000) end)
 
     exitVehicle(ped, vehicle, 256)
 
-    if DoesEntityExist(ped) then
+    if fleeImmediately then
+        CreateThread(function()
+            runAwayInFear(ped, true)
+        end)
+    elseif DoesEntityExist(ped) then
         TaskStandStill(ped, 10000)
     end
 
@@ -452,7 +465,9 @@ local function confiscateVehicle(ped, vehicle)
     currentTarget    = nil
     currentVehicle   = nil
 
-    cjDebug("SUCCESS", "Confisco concluido — NPC saiu, motor ligado")
+    cjDebug("SUCCESS", fleeImmediately
+        and "Confisco concluido — NPC fugiu a pe, motor ligado"
+        or "Confisco concluido — NPC saiu amistosamente, motor ligado")
 end
 
 -- ----------------------------------------------------------------
@@ -558,36 +573,12 @@ local function doCarjack(ped, vehicle)
         -- Só entrega quando o player realmente entrar no banco do motorista (validação do servidor exige isso).
         local vNet = NetworkGetNetworkIdFromEntity(vehicle)
         local vPlate = PRCarkeys.SanitizePlate(GetVehicleNumberPlateText(vehicle))
-        CreateThread(function()
-            local waited = 0
-            pendingGrantTemp = true
-            pendingGrantOk = false
-            while waited < 60000 and pendingGrantTemp do
-                Wait(500)
-                waited = waited + 500
-                if not DoesEntityExist(vehicle) then
-                    pendingGrantTemp = false
-                    return
-                end
-                if cache.vehicle == vehicle and cache.seat == -1 then
-                    TriggerServerEvent("pr_carkeys:server:grantTemporaryVehicleAccess", vNet, vPlate)
-                    TriggerEvent("pr_carkeys:client:clearDriverHintUI")
-                    -- aguarda confirmação server-side; reenvia se houver falha de timing/rede
-                    Wait(400)
-                    if pendingGrantOk then
-                        pendingGrantTemp = false
-                        PRCarkeys.Notify(Config.Carjack.notifySuccess or Config.Notify.keyUsed)
-                        return
-                    end
-                end
-            end
-            pendingGrantTemp = false
-        end)
+        TriggerServerEvent("pr_carkeys:server:carjackRegisterKey", vNet, vPlate)
+        TriggerEvent("pr_carkeys:client:clearDriverHintUI")
     else
         -- NPC fugiu com a chave: carro apagado e travado
         cjDebug("INFO", ("NPC fugiu com a chave | chanceKey=%.2f"):format(chanceKey))
-        --lockedVehicle(vehicle)
-        SetVehicleEngineOn(vehicle, false, true, false)
+        lockedVehicle(vehicle)
         -- 1) Player pode matar o NPC e pegar a chave (E).
         -- 2) Ou fazer ligação direta (já existe via sistema de hotwire).
         fleeingPed     = ped
@@ -747,19 +738,33 @@ CreateThread(function()
 
                 brakeNpcVehicle(target, veh)
 
-                CreateThread(function()
-                    Wait(600)
-                    if isNpcSurrendered and DoesEntityExist(target) and not handsUpPedd then
-                        handsUpPedd = true
-                        handsUpPed(target, veh)
-                    end
-                end)
-
-                showHint(Config.Carjack.policeHint or "[E] Confiscar veiculo")
-                cjDebug("INFO", ("Policial mirando NPC | dist=%.1f"):format(dist))
-
                 local pedRef = target
                 local vehRef = veh
+                local policeFleeChance = Config.Carjack.policeFleeChance
+                    or Config.Carjack.npcReactChance
+                    or 0.30
+                local willFlee = math.random() < policeFleeChance
+
+                if willFlee then
+                    CreateThread(function()
+                        Wait(math.random(900, 1800))
+                        if isNpcSurrendered and not isConfiscating and currentTarget == pedRef then
+                            confiscateVehicle(pedRef, vehRef, true)
+                        end
+                    end)
+                else
+                    CreateThread(function()
+                        Wait(600)
+                        if isNpcSurrendered and DoesEntityExist(pedRef) and not handsUpPedd then
+                            handsUpPedd = true
+                            handsUpPed(pedRef, vehRef)
+                        end
+                    end)
+                end
+
+                showHint(Config.Carjack.policeHint or "[E] Confiscar veiculo")
+                cjDebug("INFO", ("Policial mirando NPC | dist=%.1f | fuga=%s"):format(dist, tostring(willFlee)))
+
                 CreateThread(function()
                     while isNpcSurrendered and not isConfiscating do
                         local stillAiming, stillTarget = GetEntityPlayerIsFreeAimingAt(cache.playerId)

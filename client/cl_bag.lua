@@ -137,9 +137,7 @@ end)
 -- ----------------------------------------------------------------
 RegisterNetEvent("pr_carkeys:client:openStash", function(stashId)
     -- ActiveInventory é definido em shared/main.lua e acessível no client
-    if ActiveInventory == "ox_inventory" then
-        exports.ox_inventory:openInventory("stash", stashId)
-    end
+    Bridge.inventory.openInventory("stash", stashId)
     -- Para qb-inventory o servidor já abre diretamente
     bagInUse = false
 end)

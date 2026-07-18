@@ -48,9 +48,32 @@ local frameworkPriority = {
 }
 
 local detected = false
+local bridgeFramework = pr_lib and pr_lib.activeBridges and pr_lib.activeBridges.frameworks
+
+if bridgeFramework and bridgeFramework ~= "default" then
+    local ownerByBridge = {
+        qbx = "citizenid",
+        qb = "citizenid",
+        nd = "citizenid",
+        ox = "charId",
+        esx = "identifier",
+    }
+    local resourceByBridge = {
+        qbx = "qbx_core",
+        qb = "qb-core",
+        nd = "ND_Core",
+        ox = "ox_core",
+        esx = "es_extended",
+    }
+
+    PRCarkeys.OwnerColumn    = ownerByBridge[bridgeFramework] or "citizenid"
+    PRCarkeys.ActiveResource = resourceByBridge[bridgeFramework] or bridgeFramework
+    detected = true
+    Debug("SUCCESS", ("Framework via pr_bridge: '%s' | coluna owner: '%s'"):format(bridgeFramework, PRCarkeys.OwnerColumn))
+end
 
 -- Permite forçar framework via Config
-if Config.Framework and Config.Framework ~= "auto" then
+if not detected and Config.Framework and Config.Framework ~= "auto" then
     for _, fw in ipairs(frameworkPriority) do
         if fw.resource == Config.Framework then
             PRCarkeys.OwnerColumn    = fw.ownerColumn
@@ -83,7 +106,10 @@ end
 -- ============================================================
 --   DETECÇÃO DE INVENTÁRIO
 -- ============================================================
-if Config.SQL and Config.SQL ~= "auto" then
+if pr_lib and pr_lib.activeBridges and pr_lib.activeBridges.database then
+    SqlServer = pr_lib.activeBridges.database
+    Debug("INFO", ("Banco via pr_bridge: '%s'"):format(SqlServer))
+elseif Config.SQL and Config.SQL ~= "auto" then
     SqlServer = Config.SQL
     Debug("INFO", ("Sistema de Banco de dados configurado: '%s'"):format(SqlServer))
 elseif GetResourceState("oxmysql"):find("start") then
@@ -102,7 +128,22 @@ end
 -- ============================================================
 --   DETECÇÃO DE INVENTÁRIO
 -- ============================================================
-if Config.Inventory and Config.Inventory ~= "auto" then
+if pr_lib and pr_lib.activeBridges and pr_lib.activeBridges.inventory then
+    local inventoryByBridge = {
+        ox = "ox_inventory",
+        qb = "qb-inventory",
+        quasar = "qs-inventory",
+        codem = "codem-inventory",
+        origen = "origen_inventory",
+        ak47 = "ak47_inventory",
+        core = "core_inventory",
+        ps = "ps-inventory",
+        tgiann = "tgiann-inventory",
+        jaksam = "jaksam_inventory",
+    }
+    ActiveInventory = inventoryByBridge[pr_lib.activeBridges.inventory] or pr_lib.activeBridges.inventory
+    Debug("SUCCESS", ("Inventario via pr_bridge: '%s'"):format(ActiveInventory))
+elseif Config.Inventory and Config.Inventory ~= "auto" then
     ActiveInventory = Config.Inventory
     Debug("INFO", ("Inventario forcado via config: '%s'"):format(ActiveInventory))
 elseif GetResourceState("ox_inventory"):find("start") then
@@ -121,88 +162,32 @@ end
 -- ============================================================
 if IsDuplicityVersion() then
 
-    ---Executa uma query SQL de forma bloqueante (coroutine-safe).
-    ---Retorna os dados assim que o banco responder.
+    ---Executa uma query SQL via pr_bridge.
     ---@param query string
     ---@param parameters table|nil
     ---@return table|nil
     function ExecuteSQL(query, parameters)
         parameters = parameters or {}
-        local result = nil
-        local isDone = false
-
-        local function onResult(data)
-            result = data
-            isDone = true
-        end
-
-        -- Detectar tipo de query: SELECT usa fetch/query, resto usa execute
-        local isSelect = query:match("^%s*SELECT") ~= nil
-
-        if SqlServer == "oxmysql" then
-            if isSelect then
-                exports.oxmysql:query(query, parameters, onResult)
-            else
-                exports.oxmysql:execute(query, parameters, onResult)
-            end
-        elseif SqlServer == "ghmattimysql" then
-            if isSelect then
-                exports.ghmattimysql:fetchAll(query, parameters, onResult)
-            else
-                exports.ghmattimysql:execute(query, parameters, onResult)
-            end
-        elseif SqlServer == "mysql-async" then
-            if isSelect then
-                MySQL.Async.fetchAll(query, parameters, onResult)
-            else
-                MySQL.Async.execute(query, parameters, onResult)
-            end
-        else
-            Debug("ERROR", ("ExecuteSQL: SQL '%s' nao reconhecido. Verifique Config.SQL."):format(tostring(SqlServer)))
+        if not pr_lib or not pr_lib.database or not pr_lib.database.run then
+            Debug("ERROR", "ExecuteSQL: pr_bridge database indisponivel.")
             return nil
         end
 
-        while not isDone do
-            Citizen.Wait(0)
-        end
-
-        return result
+        return pr_lib.database.run(query, parameters)
     end
 
-    ---Executa INSERT e retorna o ID gerado.
+    ---Executa INSERT via pr_bridge e retorna o ID gerado.
     ---@param query string
     ---@param parameters table|nil
     ---@return number|nil
     function ExecuteSQLInsert(query, parameters)
         parameters = parameters or {}
-        local insertId = nil
-        local isDone   = false
-
-        if SqlServer == "oxmysql" then
-            exports.oxmysql:insert(query, parameters, function(id)
-                insertId = id
-                isDone   = true
-            end)
-        elseif SqlServer == "ghmattimysql" then
-            exports.ghmattimysql:execute(query, parameters, function(data)
-                insertId = data and data.insertId or nil
-                isDone   = true
-            end)
-        elseif SqlServer == "mysql-async" then
-            MySQL.Async.execute(query, parameters, function(rowsAffected, lastInsertId)
-                insertId = lastInsertId
-                isDone   = true
-            end)
-        else
-            Debug("ERROR", ("ExecuteSQLInsert: SQL '%s' nao reconhecido."):format(tostring(SqlServer)))
-            isDone = true
+        if not pr_lib or not pr_lib.database or not pr_lib.database.insert then
+            Debug("ERROR", "ExecuteSQLInsert: pr_bridge database indisponivel.")
+            return nil
         end
 
-        while not isDone do
-            Citizen.Wait(0)
-        end
-
-        return insertId
+        return pr_lib.database.insert(query, parameters)
     end
 
 end -- fim IsDuplicityVersion()

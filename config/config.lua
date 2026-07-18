@@ -110,6 +110,8 @@ Config.Default = {
     closeInventory  = false,                                        --  manté o ox_inventory aberto mesmo com menu 
     LockKey         = 'L',                                          --  Trancar/Destrancar veiculo
     EngineKey       = 'Z',                                          --  Ligar/Desligar motor
+    RevEngineEffect = true,                                         --  Liga/desliga o efeito de rev engine ao destrancar
+    RevEngineSeatHoldMs = 1500,                                      --  Mantem o ped invisivel no banco tempo suficiente para disparar o efeito
 
     KeyMetadata = {
         showOwner = true,                                           --  Registra o dono do carro no metadata do veiculo
@@ -155,9 +157,9 @@ Config.KeyInVehicle = {
 }
 
 -- ----------------------------------------------------------------
--- POLICIAL — acesso sem chave
+-- POLICIAL - acesso operacional
 -- Policiais podem trancar/destrancar qualquer veículo.
--- Com arma apontada para NPC, podem roubar as chaves sem lockpick.
+-- Ao concluir um confisco de NPC, recebem uma chave temporária física.
 -- ----------------------------------------------------------------
 Config.Police = {
     enabled = true,
@@ -167,7 +169,7 @@ Config.Police = {
 -- ----------------------------------------------------------------
 -- HOTWIRE (ligar na força)
 -- Tecla: RegisterKeyMapping (hotwireKey) — inicia Config.Minigame em modo parked/carjack.
--- Ao concluir: servidor chama export GiveTempKey (chave temporária lógica, sem item DB).
+-- Ao concluir: o servidor valida a sessão e entrega um item carkey_temp.
 -- ----------------------------------------------------------------
 Config.Hotwire = {
     enabled       = true,
@@ -184,7 +186,7 @@ Config.Hotwire = {
 -- ----------------------------------------------------------------
 Config.Minigame = {
     minigame = "glitch-minigame",  -- ox_lib | glitch-minigame | mhacking
-    game     = "BruteForce",         -- nome do minigame (ver lista no bridge)
+    game     = "PipePressure",       -- chama StartPipePressureGame pelo pr_bridge
 
     dificultMinigame = {
         -- ── Veículo estacionado (ligação direta) ──────────────
@@ -406,6 +408,7 @@ Config.Carjack = {
     notifyPolice   = nil,                         -- nil = usa Config.Notify.keyUsed
     aimDistance    = 30.0,                        -- distância máxima para detectar NPC motorista
     npcReactChance = 0.30,                        -- chance do NPC puxar arma ao ser rendido (0.0 a 1.0)
+    policeFleeChance = 0.30,                      -- chance do NPC sair e fugir antes do policial pressionar E
     chance = {                                    -- chance do NPC reagir fugindo com veiculo de acordo com a classe da arma
         ["2685387236"] = 0.0,  -- melee
         ["416676503"]  = 0.5,  -- handguns
