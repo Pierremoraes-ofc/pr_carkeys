@@ -1,4 +1,13 @@
 -- ============================================================
+local VehicleStateBags = assert(
+    pr_lib and pr_lib.fivem and pr_lib.fivem.vehicleState and pr_lib.fivem.vehicleState.raw,
+    "[pr_carkeys] pr_bridge vehicleState indisponivel"
+)
+
+local function setVehicleState(vehicle, key, value)
+    return VehicleStateBags.set(vehicle, key, value, { replicated = true, authority = "server" })
+end
+
 --   pr_carkeys — server/sv_vehicle.lua
 -- ============================================================
 
@@ -17,7 +26,7 @@ local HotwireSessions = {}
 -- ================================================================
 
 local function sanitize(plate)
-    return PRCarkeys.SanitizePlate(plate)
+    return PRCarkeys.ResolveKeyPlate(plate)
 end
 
 local function createVehicleSession(sessions, src, vehNetId, plate, duration)
@@ -99,6 +108,15 @@ end
 ---@return boolean
 local function playerHasAccess(src, citizenid, plate)
     plate = sanitize(plate)
+
+    -- The seated driver may operate an existing ignition key without taking the item.
+    for netId, key in pairs(VehiclesWithKeyInside) do
+        if key.plate == plate then
+            local vehicle = NetworkGetEntityFromNetworkId(netId)
+            if vehicle ~= 0 and DoesEntityExist(vehicle)
+                and GetPedInVehicleSeat(vehicle, -1) == GetPlayerPed(src) then return true end
+        end
+    end
 
     -- 1. TempKey (hotwire/lockpick/chave no carro)
     local tempEntry = TempKeys[citizenid] and TempKeys[citizenid][plate] or nil
@@ -375,7 +393,7 @@ RegisterNetEvent("pr_carkeys:server:setVehicleLockState", function(vehNetId, sta
     if not vehicle or vehicle == 0 then return end
 
     SetVehicleDoorsLocked(vehicle, state)
-    Entity(vehicle).state:set("doorslockstate", state, true)
+    setVehicleState(vehicle, "doorslockstate", state)
     if state == 1 then
         FreezeEntityPosition(vehicle, false)
     end
@@ -397,7 +415,7 @@ end)
 
 --- Chamado pelo client quando entra no banco do motorista
 --- Servidor verifica se tem acesso e autoriza ou bloqueia o motor
-RegisterNetEvent("pr_carkeys:server:validateDriverSeat", function(vehNetId, plate)
+RegisterNetEvent("pr_carkeys:server:validateDriverSeat", function(vehNetId, plate, requestId, revision)
     local src       = source
     local citizenid = Bridge.framework.GetIdentifier(src)
     if not citizenid then return end
@@ -420,6 +438,9 @@ RegisterNetEvent("pr_carkeys:server:validateDriverSeat", function(vehNetId, plat
     end
 
     TriggerClientEvent("pr_carkeys:client:driverSeatValidation", src, {
+        requestId    = requestId,
+        revision     = revision,
+        netId        = vehNetId,
         hasAccess    = hasAccess,
         keyAvailable = keyAvailable,
         barcode      = keyAvailable and keyInCar.barcode or nil,
@@ -431,24 +452,31 @@ end)
 --   CHAVE NO CARRO
 -- ================================================================
 
-RegisterNetEvent("pr_carkeys:server:keyLeftInVehicle", function(vehNetId, plate)
-    local src       = source
+local function putIgnitionKey(src, vehNetId, plate)
     local citizenid = Bridge.framework.GetIdentifier(src)
-    if not citizenid then return end
+    if not citizenid then return false, "player_missing" end
 
     plate = sanitize(plate)
+    local vehicle = NetworkGetEntityFromNetworkId(vehNetId)
+    if vehicle == 0 or not DoesEntityExist(vehicle)
+        or GetPedInVehicleSeat(vehicle, -1) ~= GetPlayerPed(src)
+        or sanitize(GetVehicleNumberPlateText(vehicle)) ~= plate then return false, "driver_changed" end
+
     Debug("INFO", ("keyLeftInVehicle: recebido | src=%d | plate=%s | vehNetId=%d"):format(src, plate, vehNetId))
 
     -- Já tem chave registrada nesse veículo? Ignorar (evita duplicatas)
     if VehiclesWithKeyInside[vehNetId] then
+        if VehiclesWithKeyInside[vehNetId].plate ~= plate then return false, "vehicle_changed" end
+        setVehicleState(vehicle, "pr_carkeys_ignition", true)
+        setVehicleState(vehicle, "pr_carkeys_keyInIgnition", true)
         Debug("INFO", ("keyLeftInVehicle: chave ja registrada nesse veiculo, ignorando"):format())
-        return
+        return true
     end
 
     local okRemove, removedData = removeKeyItemConfirmed(src, plate)
     if not okRemove or not removedData then
         Debug("WARNING", ("keyLeftInVehicle: item nao encontrado em lugar algum | src=%d | plate=%s"):format(src, plate))
-        return
+        return false, "key_not_removed"
     end
 
     VehiclesWithKeyInside[vehNetId] = {
@@ -466,9 +494,13 @@ RegisterNetEvent("pr_carkeys:server:keyLeftInVehicle", function(vehNetId, plate)
     TempKeys[citizenid][plate] = { kind = "vehicle" }
     TriggerClientEvent("pr_carkeys:client:addTempKey", src, plate)
 
+    setVehicleState(vehicle, "pr_carkeys_ignition", true)
+    setVehicleState(vehicle, "pr_carkeys_keyInIgnition", true)
+
     Debug("SUCCESS", ("keyLeftInVehicle: TempKey criada | src=%d | plate=%s | item=%s | origem=%s"):format(
         src, plate, tostring(removedData.itemName), tostring(removedData.fromStash or "inventario")))
-end)
+    return true
+end
 
 local function restoreDeletedVehicleKey(vehNetId, keyData)
     if not keyData then return end
@@ -659,17 +691,31 @@ RegisterNetEvent("pr_carkeys:server:pickupKeyFromVehicle", function(vehNetId, pl
     Debug("INFO", ("pickupKeyFromVehicle: src=%d | plate=%s"):format(src, plate))
 end)
 
-RegisterNetEvent("pr_carkeys:server:returnKeyFromVehicle", function(vehNetId, plate)
-    local src       = source
+local function returnIgnitionKey(src, vehNetId, plate)
     local citizenid = Bridge.framework.GetIdentifier(src)
-    if not citizenid then return end
+    if not citizenid then return false, "player_missing" end
 
     plate = sanitize(plate)
     local keyData = VehiclesWithKeyInside[vehNetId]
-    if not keyData or keyData.plate ~= plate then return end
 
-    -- Qualquer player com TempKey pode devolver (inclusive quem não é o dono)
-    if TempKeys[citizenid] then TempKeys[citizenid][plate] = nil end
+    local vehicle = NetworkGetEntityFromNetworkId(vehNetId)
+    if vehicle == 0 or not DoesEntityExist(vehicle)
+        or GetPedInVehicleSeat(vehicle, -1) ~= GetPlayerPed(src)
+        or sanitize(GetVehicleNumberPlateText(vehicle)) ~= plate then return false, "driver_changed" end
+    if keyData and keyData.plate ~= plate then return false, "vehicle_changed" end
+    setVehicleState(vehicle, "pr_carkeys_ignition", false)
+    if not keyData then
+        setVehicleState(vehicle, "pr_carkeys_keyInIgnition", false)
+        return true, "no_key_in_ignition"
+    end
+
+    -- Keep the record and access until inventory delivery succeeds.
+    local function commitReturn()
+        VehiclesWithKeyInside[vehNetId] = nil
+        if TempKeys[citizenid] then TempKeys[citizenid][plate] = nil end
+        setVehicleState(vehicle, "pr_carkeys_keyInIgnition", false)
+        TriggerClientEvent("pr_carkeys:client:keyReturnedToInventory", src, plate)
+    end
 
     -- Determina onde devolver:
     -- Se é o dono original → devolve para onde tirou (bolsa ou inventário)
@@ -699,9 +745,9 @@ RegisterNetEvent("pr_carkeys:server:returnKeyFromVehicle", function(vehNetId, pl
         else
             Debug("SUCCESS", ("returnKeyFromVehicle(carjack): carkey_temp entregue | src=%d | plate=%s"):format(src, plate))
         end
-        VehiclesWithKeyInside[vehNetId] = nil
-        TriggerClientEvent("pr_carkeys:client:keyReturnedToInventory", src, plate)
-        return
+        if not added then return false, "inventory_full" end
+        commitReturn()
+        return true
     end
 
     -- Busca dados completos do banco
@@ -716,11 +762,13 @@ RegisterNetEvent("pr_carkeys:server:returnKeyFromVehicle", function(vehNetId, pl
         PRCarkeys.Cache.InvalidateKey(keyData.barcode)
         ExecuteSQL("DELETE FROM pr_carkeys WHERE barcode = ?", { keyData.barcode })
         VehiclesWithKeyInside[vehNetId] = nil
+        if TempKeys[citizenid] then TempKeys[citizenid][plate] = nil end
+        setVehicleState(vehicle, "pr_carkeys_keyInIgnition", false)
         TriggerClientEvent("pr_carkeys:client:removeTempKey", src, plate)
         Debug("INFO", ("returnKeyFromVehicle: chave expirada na ignicao, removida | barcode=%s | plate=%s"):format(
             tostring(keyData.barcode), tostring(plate)))
         TriggerClientEvent("pr_carkeys:client:keyExpired", src)
-        return
+        return true, "expired"
     end
 
     -- Busca modelo do veículo (igual ao givekey)
@@ -852,9 +900,44 @@ RegisterNetEvent("pr_carkeys:server:returnKeyFromVehicle", function(vehNetId, pl
         Debug("SUCCESS", ("returnKeyFromVehicle: devolvida | src=%d | plate=%s"):format(src, plate))
     end
 
-    VehiclesWithKeyInside[vehNetId] = nil
-    TriggerClientEvent("pr_carkeys:client:keyReturnedToInventory", src, plate)
+    if not added then return false, "inventory_full" end
+    commitReturn()
     Debug("INFO", ("returnKeyFromVehicle: finalizado | src=%d | plate=%s"):format(src, plate))
+    return true
+end
+
+-- One transfer per vehicle, shared by callbacks and legacy events.
+local ignitionTransactions = {}
+local function ignitionOperation(action, src, vehNetId, plate)
+    if type(vehNetId) ~= "number" or type(plate) ~= "string" then
+        return { ok = false, reason = "invalid_request" }
+    end
+    local deadline = GetGameTimer() + 5000
+    while ignitionTransactions[vehNetId] do
+        if GetGameTimer() >= deadline then return { ok = false, reason = "busy" } end
+        Wait(25)
+    end
+    ignitionTransactions[vehNetId] = true
+    local ok, success, reason = pcall(action, src, vehNetId, plate)
+    ignitionTransactions[vehNetId] = nil
+    if not ok then
+        print("[pr_carkeys] Falha na transferencia da chave: " .. tostring(success))
+        return { ok = false, reason = "transfer_error" }
+    end
+    return { ok = success == true, reason = reason }
+end
+
+pr_lib.callback.register("pr_carkeys:server:putIgnitionKey", function(src, netId, plate)
+    return ignitionOperation(putIgnitionKey, src, netId, plate)
+end)
+pr_lib.callback.register("pr_carkeys:server:returnIgnitionKey", function(src, netId, plate)
+    return ignitionOperation(returnIgnitionKey, src, netId, plate)
+end)
+RegisterNetEvent("pr_carkeys:server:keyLeftInVehicle", function(netId, plate)
+    ignitionOperation(putIgnitionKey, source, netId, plate)
+end)
+RegisterNetEvent("pr_carkeys:server:returnKeyFromVehicle", function(netId, plate)
+    ignitionOperation(returnIgnitionKey, source, netId, plate)
 end)
 
 -- ================================================================
@@ -1109,7 +1192,7 @@ RegisterNetEvent("qb-vehiclekeys:server:setVehLockState", function(vehNetId, sta
     if not PRCarkeys.IsPlayerPolice(src) and not playerHasAccess(src, citizenid, plate) then return end
 
     SetVehicleDoorsLocked(vehicle, state)
-    Entity(vehicle).state:set("doorslockstate", state, true)
+    setVehicleState(vehicle, "doorslockstate", state)
 end)
 
 RegisterNetEvent("qb-vehiclekeys:server:AcquireVehicleKeys", function(plate)
@@ -1282,7 +1365,7 @@ RegisterNetEvent("pr_carkeys:server:secureParkedVehicle", function(vehNetId)
     if not citizenid or playerHasAccess(src, citizenid, vehiclePlate) then return end
 
     SetVehicleDoorsLocked(vehicle, 7)
-    Entity(vehicle).state:set("doorslockstate", 7, true)
+    setVehicleState(vehicle, "doorslockstate", 7)
 end)
 
 RegisterNetEvent("pr_carkeys:server:grantTemporaryKeyItemNearbyVehicle", function(vehNetId, plate)
@@ -1372,7 +1455,7 @@ end)
 exports("SetLockState",   function(vehicle, state)
     if not vehicle or vehicle == 0 then return end
     SetVehicleDoorsLocked(vehicle, state)
-    Entity(vehicle).state:set("doorslockstate", state, true)
+    setVehicleState(vehicle, "doorslockstate", state)
     if state == 1 then
         FreezeEntityPosition(vehicle, false)
     end
@@ -1556,4 +1639,12 @@ RegisterNetEvent("pr_carkeys:server:carjackSuccess", function(plate)
     -- Redireciona para o novo fluxo se chamado (retrocompatibilidade)
     local src = source
     Debug("INFO", ("carjackSuccess: redirecionando para carjackRegisterKey | src=%d"):format(src))
+end)
+
+--278: contract-only proof;does not grant keys or perform database writes.
+exports('ForgeKeysReadiness',function()
+ assert(GetInvokingResource()=='forge-core','local Forge/PR proof required')
+ return {generation=GetConvar('forge:bootGeneration',''),resource='pr_carkeys',
+  ready=type(PRCarkeys.GiveTempKey)=='function'and type(PRCarkeys.CreateTempKeyItem)=='function',
+  contractOnly=true}
 end)

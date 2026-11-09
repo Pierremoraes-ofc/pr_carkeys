@@ -5,7 +5,10 @@
 --   O comando "togglelocks" fica em vehicle_lock.lua.
 -- ============================================================
 
-local VehicleState = require 'client.modules.vehicle_state'
+local VehicleState = assert(
+    PRCarkeys.VehicleState,
+    "[pr_carkeys] VehicleState deve ser carregado antes do cl_keys"
+)
 
 local function emitLockChanged(vehicle, plate, lockState)
     if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then return end
@@ -95,6 +98,8 @@ RegisterNetEvent("pr_carkeys:client:executeUseKey", function(keyData)
         return
     end
 
+    -- A later Z/lock action invalidates this request while its animation waits.
+    local revision = PRCarkeys.engineAccessRevision
     -- Animação
     local anim = Config.Default.UseKeyAnim
     RequestAnimDict(anim.dict)
@@ -106,6 +111,9 @@ RegisterNetEvent("pr_carkeys:client:executeUseKey", function(keyData)
     Wait(anim.time)
     ClearPedTasks(PlayerPedId())
 
+    if revision ~= PRCarkeys.engineAccessRevision or PRCarkeys.engineTransitionVehicle
+        or not DoesEntityExist(vehicle) then return end
+    PRCarkeys.engineAccessRevision = PRCarkeys.engineAccessRevision + 1
     local plate      = PRCarkeys.SanitizePlate(keyData.plate)
     local lockStatus = GetVehicleDoorLockStatus(vehicle)
     local locking    = (lockStatus == 1)   -- se está desbloqueado → vai travar
@@ -139,8 +147,8 @@ RegisterNetEvent("pr_carkeys:client:executeUseKey", function(keyData)
         PRCarkeys.Notify(Config.Notify.keyLocked)
     else
         -- Desbloqueando
-        if keyData.motor then
-            SetVehicleEngineOn(vehicle, true, true, false)
+        if keyData.motor == true or keyData.motor == 1 then
+            PRCarkeys.SetEngineState(vehicle, true, true, false, "inventory_key_remote_start")
             PRCarkeys.Notify(Config.Notify.keyUsedEngine)
         else
             PRCarkeys.Notify(Config.Notify.keyUsed)

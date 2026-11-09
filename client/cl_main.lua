@@ -76,7 +76,7 @@ function PRCarkeys.FindVehicleByPlate(plate, maxDistance)
         local vehCoords = GetEntityCoords(veh)
         local d = #(coords - vehCoords)
         if d <= dist then
-            local vehPlate = PRCarkeys.SanitizePlate(GetVehicleNumberPlateText(veh))
+            local vehPlate = PRCarkeys.GetVehicleKeyPlate(veh)
             if vehPlate == plate and d < closestDist then
                 closest     = veh
                 closestDist = d

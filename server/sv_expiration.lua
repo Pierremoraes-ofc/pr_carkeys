@@ -23,6 +23,11 @@ local function stopVehicleIfKeyInIgnition(barcode)
             -- Server não desliga motor diretamente; delega ao cliente do motorista.
             local veh = NetworkGetEntityFromNetworkId(vehNetId)
             if veh and veh ~= 0 then
+                local rawState = pr_lib.fivem.vehicleState.raw
+                local options = { replicated = true, authority = "server" }
+                rawState.set(veh, "pr_carkeys_ignition", false, options)
+                rawState.set(veh, "pr_carkeys_keyInIgnition", false, options)
+
                 -- Broadcast para garantir desligamento mesmo se troca de driver/owner em rede.
                 TriggerClientEvent("pr_carkeys:client:forceEngineOff", -1, vehNetId)
 

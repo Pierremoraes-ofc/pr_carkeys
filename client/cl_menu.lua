@@ -391,13 +391,13 @@ function editDistance(barcode)
                 type    = "number",
                 label   = "Distancia (metros)",
                 min     = 1,
-                max     = 30,
+                max     = Config.Default.MaxSignalDistance or 50,
                 default = Config.Default.UseKeyAnim.DefaultDistance or 5.0,
             },
         })
         if input and input[1] then
             local dist = tonumber(input[1])
-            if dist and dist >= 1 and dist <= 30 then
+            if dist and dist >= 1 and dist <= (Config.Default.MaxSignalDistance or 50) then
                 TriggerServerEvent("pr_carkeys:server:updateKeyConfig", barcode, "distance", dist)
                 -- Reabre o submenu localmente com a nova distância
                 if lastKeyArgs and lastKeyArgs.barcode == barcode then
@@ -418,7 +418,7 @@ function editDistance(barcode)
         local distMenu = {
             { header = "Escolher Distancia", isMenuHeader = true },
         }
-        for _, v in ipairs({ 2, 3, 5, 8, 10, 15, 20 }) do
+        for _, v in ipairs({ 2, 3, 5, 8, 10, 15, 20, Config.Default.MaxSignalDistance or 50 }) do
             table.insert(distMenu, {
                 header = v .. " metros",
                 params = {
@@ -444,7 +444,10 @@ end)
 RegisterNetEvent("pr_carkeys:client:keyConfigUpdated", function(barcode, field, value)
     PRCarkeys.Debug(("Config atualizada | barcode=%s | %s=%s"):format(barcode, field, tostring(value)))
 
-    local VehicleState = require 'client.modules.vehicle_state'
+    local VehicleState = assert(
+        PRCarkeys.VehicleState,
+        "[pr_carkeys] VehicleState indisponivel no menu de chaves"
+    )
 
     -- Atualiza diretamente no VehicleState.permanentKeys pelo barcode
     local plateKeys = {}

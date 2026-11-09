@@ -107,8 +107,9 @@ Config.Sound = {
 -- CONFIGURAÇÃO PADRÃO
 -- ----------------------------------------------------------------
 Config.Default = {
-    closeInventory  = false,                                        --  manté o ox_inventory aberto mesmo com menu 
+    closeInventory  = true,                                        --  manté o ox_inventory aberto mesmo com menu 
     LockKey         = 'L',                                          --  Trancar/Destrancar veiculo
+    MaxSignalDistance = 50.0,                                      -- Limite configuravel do alcance da chave (metros)
     EngineKey       = 'Z',                                          --  Ligar/Desligar motor
     RevEngineEffect = true,                                         --  Liga/desliga o efeito de rev engine ao destrancar
     RevEngineSeatHoldMs = 1500,                                      --  Mantem o ped invisivel no banco tempo suficiente para disparar o efeito
@@ -140,6 +141,8 @@ Config.NoKeyNeeded = {
     [`tribike`] = true,
     [`tribike2`]= true,
     [`tribike3`]= true,
+    [`inductor`]= true,
+    [`inductor2`]= true,
 }
 
 -- ----------------------------------------------------------------

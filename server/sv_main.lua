@@ -182,8 +182,11 @@ local function cleanupTemporaryKeysForPlayer(src)
 end
 
 -- QBCore / QBX
-AddEventHandler("QBCore:Server:OnPlayerLoaded", function(player)
-    local src = type(player) == "number" and player or (player and player.PlayerData and player.PlayerData.source)
+RegisterNetEvent("QBCore:Server:OnPlayerLoaded", function(player)
+    local src = source
+    if not src or src <= 0 then
+        src = type(player) == "number" and player or (player and player.PlayerData and player.PlayerData.source)
+    end
     if src then cleanupTemporaryKeysForPlayer(src) end
 end)
 

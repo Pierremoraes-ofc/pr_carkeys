@@ -68,7 +68,7 @@ local function showHint(text)
     if textUIVisible then return end
     textUIVisible = true
 
-    if GetResourceState("ox_lib"):find("start") and lib and lib.showTextUI then
+    if lib and lib.showTextUI then
         lib.showTextUI(text, { position = "right-center" })
     else
         CreateThread(function()
@@ -93,7 +93,7 @@ end
 local function hideHint()
     if not textUIVisible then return end
     textUIVisible = false
-    if GetResourceState("ox_lib"):find("start") and lib and lib.hideTextUI then
+    if lib and lib.hideTextUI then
         lib.hideTextUI()
     end
 end
@@ -122,7 +122,7 @@ end
 -- Progressbar — ox_lib ou Wait simples
 -- ----------------------------------------------------------------
 local function doProgressBar(duration, label, cb)
-    if GetResourceState("ox_lib"):find("start") and lib and lib.progressBar then
+    if lib and lib.progressBar then
         local success = lib.progressBar({
             duration  = duration,
             label     = label,
@@ -201,7 +201,11 @@ end)
 local function keepEngineOn(vehicle, duration)
     local t = 0
     while DoesEntityExist(vehicle) and t < duration do
-        SetVehicleEngineOn(vehicle, true, true, true)
+        local driver = GetPedInVehicleSeat(vehicle, -1)
+        if driver == 0 or IsPedAPlayer(driver) or Entity(vehicle).state.pr_carkeys_ignition == false then return end
+        if not GetIsVehicleEngineRunning(vehicle) then
+            PRCarkeys.SetEngineState(vehicle, true, true, true, "carjack_keep_running")
+        end
         Wait(100)
         t = t + 100
     end
@@ -253,7 +257,7 @@ local function driveableVehicle(vehicle)
     FreezeEntityPosition(vehicle, false)
     SetVehicleDoorsLocked(vehicle, 1)
     SetVehicleDoorsLockedForAllPlayers(vehicle, false)
-    SetVehicleEngineOn(vehicle, true, true, true)
+    PRCarkeys.SetEngineState(vehicle, true, true, true, "carjack_start")
     CreateThread(function() keepEngineOn(vehicle, 6000) end)
     hideHint()
 end
@@ -265,7 +269,7 @@ local function lockedVehicle(vehicle)
     if not DoesEntityExist(vehicle) then return end
     FreezeEntityPosition(vehicle, false)
     SetVehicleUndriveable(vehicle, true)
-    SetVehicleEngineOn(vehicle, false, true, false)
+    PRCarkeys.SetEngineState(vehicle, false, true, false, "carjack_stop")
     SetVehicleDoorsLocked(vehicle, 2)
     SetVehicleDoorsLockedForAllPlayers(vehicle, true)
 end
@@ -418,7 +422,7 @@ local function registerPoliceVehicleKeyInIgnition(vehicle)
     if not DoesEntityExist(vehicle) then return end
 
     local vehNetId = NetworkGetNetworkIdFromEntity(vehicle)
-    local plate = PRCarkeys.SanitizePlate(GetVehicleNumberPlateText(vehicle))
+    local plate = PRCarkeys.GetVehicleKeyPlate(vehicle)
     local success, reason = pr_lib.callback.await(
         "pr_carkeys:server:registerPoliceIgnitionKey",
         false,
@@ -572,7 +576,7 @@ local function doCarjack(ped, vehicle)
         driveableVehicle(vehicle)
         -- Só entrega quando o player realmente entrar no banco do motorista (validação do servidor exige isso).
         local vNet = NetworkGetNetworkIdFromEntity(vehicle)
-        local vPlate = PRCarkeys.SanitizePlate(GetVehicleNumberPlateText(vehicle))
+        local vPlate = PRCarkeys.GetVehicleKeyPlate(vehicle)
         TriggerServerEvent("pr_carkeys:server:carjackRegisterKey", vNet, vPlate)
         TriggerEvent("pr_carkeys:client:clearDriverHintUI")
     else
@@ -583,7 +587,7 @@ local function doCarjack(ped, vehicle)
         -- 2) Ou fazer ligação direta (já existe via sistema de hotwire).
         fleeingPed     = ped
         fleeingVehicle = vehicle
-        fleeingPlate   = PRCarkeys.SanitizePlate(GetVehicleNumberPlateText(vehicle))
+        fleeingPlate   = PRCarkeys.GetVehicleKeyPlate(vehicle)
         canLootFleeKey = true
     end
 

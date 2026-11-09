@@ -2,10 +2,19 @@
 --   pr_carkeys — client/modules/vehicle_init.lua
 --   Inicialização reativa via lib.onCache.
 -- ============================================================
-
-local VehicleState = require 'client.modules.vehicle_state'
-local VehicleLock  = require 'client.modules.vehicle_lock'
-local KeyInVehicle = require 'client.modules.key_in_vehicle'
+local lastKnownEngineState = false
+local VehicleState = assert(
+    PRCarkeys.VehicleState,
+    "[pr_carkeys] VehicleState deve ser carregado antes do VehicleInit"
+)
+local VehicleLock = assert(
+    PRCarkeys.VehicleLock,
+    "[pr_carkeys] VehicleLock deve ser carregado antes do VehicleInit"
+)
+local KeyInVehicle = assert(
+    PRCarkeys.KeyInVehicle,
+    "[pr_carkeys] KeyInVehicle deve ser carregado antes do VehicleInit"
+)
 
 local function snapshotTableValues(source)
     local values = {}
@@ -97,18 +106,32 @@ local function fetchKeysInBags()
     ))
 end
 
+local driverValidationSequence = 0
+local lastDrivenVehicle = nil
+local function requestDriverValidation(vehicle, plate)
+    driverValidationSequence = driverValidationSequence + 1
+    TriggerServerEvent("pr_carkeys:server:validateDriverSeat", NetworkGetNetworkIdFromEntity(vehicle), plate,
+        driverValidationSequence, PRCarkeys.engineAccessRevision)
+end
+
 -- ----------------------------------------------------------------
 -- Ao entrar/sair de veículo
 -- ----------------------------------------------------------------
-lib.onCache("vehicle", function(vehicle)
+lib.onCache("vehicle", function(vehicle, previousVehicle)
     if vehicle then
         VehicleState.currentVehicle  = vehicle
-        local plate = PRCarkeys.SanitizePlate(GetVehicleNumberPlateText(vehicle))
+        local plate = PRCarkeys.GetVehicleKeyPlate(vehicle)
         VehicleState.currentPlate    = plate
         VehicleState.isInDriverSeat  = (GetPedInVehicleSeat(vehicle, -1) == cache.ped)
         VehicleState.hasKey          = VehicleState:HasKey(plate)
         VehicleState.isEngineRunning = GetIsVehicleEngineRunning(vehicle)
         VehicleState.hotwireToken    = nil
+
+        -- Bloqueia a partida pelo W tanto com o motor ligado quanto desligado.
+        if VehicleState.isInDriverSeat then
+            lastDrivenVehicle = vehicle
+            PRCarkeys.MaintainIgnitionEngine(vehicle)
+        end
 
         -- Se entrou no banco do motorista sem chave: verifica se há chave no carro
         if not VehicleState.hasKey and VehicleState.isInDriverSeat then
@@ -123,35 +146,25 @@ lib.onCache("vehicle", function(vehicle)
             local barcode = keyData and keyData.barcode or nil
             TriggerServerEvent("pr_carkeys:server:fetchKeyDbData", plate, barcode)
         end
+
+        if VehicleState.isInDriverSeat then
+            lastKnownEngineState = GetIsVehicleEngineRunning(vehicle)
+        end
     else
         -- Saiu do veículo
-        local leftVehicle = VehicleState.currentVehicle
-        local leftPlate = VehicleState.currentPlate
-        if leftVehicle and leftVehicle ~= 0 then
-            local forcedExit = IsPedRagdoll(cache.ped) or IsEntityDead(cache.ped)
-                or GetEntitySpeed(leftVehicle) > 10.0
-
-            if forcedExit and DoesEntityExist(leftVehicle) then
-                NetworkRequestControlOfEntity(leftVehicle)
-                SetVehicleEngineOn(leftVehicle, false, true, true)
-                SetVehicleHandbrake(leftVehicle, true)
-                VehicleState.isEngineRunning = false
-                PRCarkeys.OnEngineStopped(leftVehicle, leftPlate)
-                Debug("INFO", ("[VehicleExit] forced exit; engine stopped | plate=%s"):format(tostring(leftPlate)))
-            end
-
-            -- keepVehicleEngineOn: mantém motor ligado ao sair do carro
-            -- Usa parâmetro 'instantly=true, otherwise=false' para não religar automaticamente
-            if not forcedExit and Config.KeyInVehicle.keepVehicleEngineOn
-            and VehicleState.isInDriverSeat
-            and VehicleState.isEngineRunning then
-                -- 'true, true, false' = ligar, instantly, sem forçar novo estado
-                SetVehicleEngineOn(leftVehicle, true, true, false)
-                Debug("INFO", ("[keepEngineOn] Motor mantido ligado ao sair | plate=%s"):format(
-                    tostring(VehicleState.currentPlate)))
-            end
+        local exitedVehicle = previousVehicle or lastDrivenVehicle
+        if lastDrivenVehicle and exitedVehicle == lastDrivenVehicle and lastKnownEngineState then
+            local vehicleToPreserve = exitedVehicle
+            CreateThread(function()
+                local deadline = GetGameTimer() + 1000
+                while DoesEntityExist(vehicleToPreserve) and GetGameTimer() < deadline do
+                    PRCarkeys.PreserveRunningEngineAfterExit(vehicleToPreserve, true)
+                    Wait(100)
+                end
+            end)
         end
-
+        lastDrivenVehicle = nil
+        PRCarkeys.ResetPedEngineFlags()
         VehicleState.currentVehicle  = 0
         VehicleState.currentPlate    = nil
         VehicleState.isInDriverSeat  = false
@@ -162,7 +175,31 @@ lib.onCache("vehicle", function(vehicle)
         clearDriverHintUI()
     end
 end)
+CreateThread(function()
+    local wasInVehicle = false
+    local vehicleRef = nil
+    local engineWasOn = false
 
+    while true do
+        Wait(200)
+        local ped = PlayerPedId()
+
+        if IsPedInAnyVehicle(ped, false) then
+            wasInVehicle = true
+            vehicleRef = GetVehiclePedIsIn(ped, false)
+            engineWasOn = GetIsVehicleEngineRunning(vehicleRef)
+        else
+            if wasInVehicle and vehicleRef and DoesEntityExist(vehicleRef) and engineWasOn then
+                print(("[teste] motor estava ligado antes de sair, engine running agora = %s"):format(tostring(GetIsVehicleEngineRunning(vehicleRef))))
+                if not GetIsVehicleEngineRunning(vehicleRef) then
+                    SetVehicleEngineOn(vehicleRef, true, false, true)
+                    print("[teste] forcei religar")
+                end
+            end
+            wasInVehicle = false
+        end
+    end
+end)
 -- ----------------------------------------------------------------
 -- Ao mudar de assento
 -- ----------------------------------------------------------------
@@ -171,20 +208,23 @@ lib.onCache("seat", function(seat)
     VehicleState.isInDriverSeat = (seat == -1)
 
     if seat ~= -1 then
+        PRCarkeys.ResetPedEngineFlags()
         clearDriverHintUI()
         return
     end
 
     -- Entrou no banco do motorista — delega validação ao servidor
     local vehicle = cache.vehicle
-    local plate   = PRCarkeys.SanitizePlate(GetVehicleNumberPlateText(vehicle))
+    lastDrivenVehicle = vehicle
+    local plate   = PRCarkeys.GetVehicleKeyPlate(vehicle)
     VehicleState.currentPlate = plate
     VehicleState.hasKey       = VehicleState:HasKey(plate)
 
+    PRCarkeys.MaintainIgnitionEngine(vehicle)
+
     -- Aguarda resposta do servidor antes de desligar motor
     -- Evita desligar motor de quem tem chave mas o cache ainda não sincronizou
-    TriggerServerEvent("pr_carkeys:server:validateDriverSeat",
-        NetworkGetNetworkIdFromEntity(vehicle), plate)
+    requestDriverValidation(vehicle, plate)
 end)
 
 -- ----------------------------------------------------------------
@@ -192,32 +232,27 @@ end)
 -- ----------------------------------------------------------------
 RegisterNetEvent("pr_carkeys:client:driverSeatValidation", function(result)
     if not result then return end
+    if PRCarkeys.engineTransitionVehicle then return end
+    if result.requestId ~= driverValidationSequence or result.revision ~= PRCarkeys.engineAccessRevision then return end
     local plate   = result.plate
     local vehicle = VehicleState.currentVehicle
     if not vehicle or vehicle == 0 then return end
     if cache.seat ~= -1 then return end  -- saiu do banco antes de responder
+    if not DoesEntityExist(vehicle) then return end
+    if PRCarkeys.SanitizePlate(plate) ~= VehicleState.currentPlate then return end
+    if result.netId and result.netId ~= NetworkGetNetworkIdFromEntity(vehicle) then return end
+    if GetPedInVehicleSeat(vehicle, -1) ~= PlayerPedId() then return end
+
 
     if result.hasAccess then
         VehicleState.hasKey = true
         VehicleState.hotwireToken = nil
         clearDriverHintUI()
 
-        -- Acesso confirmado
-        local engineAlreadyOn = GetIsVehicleEngineRunning(vehicle)
-        local hasTempKey = VehicleState.temporaryKeys[result.plate] == true
-        Debug("INFO", ("[driverSeatValidation] Acesso OK | plate=%s | motor=%s | temp=%s"):format(
-            tostring(result.plate), tostring(engineAlreadyOn), tostring(hasTempKey)))
-
-        -- Motor só desliga se não tem nenhum tipo de acesso (sem TempKey e sem permanente)
-        -- TempKey = carjack, hotwire, chave no carro — motor deve ficar ligado
-        if engineAlreadyOn and not hasTempKey then
-            SetVehicleEngineOn(vehicle, false, true, true)
-            VehicleState.isEngineRunning = false
-            Debug("INFO", ("[driverSeatValidation] Motor desligado — sem TempKey"))
-        elseif engineAlreadyOn and hasTempKey then
-            VehicleState.isEngineRunning = true
-            Debug("INFO", ("[driverSeatValidation] Motor mantido — tem TempKey"))
-        end
+        -- Authorized access must never switch off an already running engine.
+        -- The temporary key may arrive after this reply during inventory transfer.
+        VehicleState.isEngineRunning = GetIsVehicleEngineRunning(vehicle)
+        PRCarkeys.MaintainIgnitionEngine(vehicle)
     elseif result.keyAvailable then
         VehicleState.hotwireToken = nil
         -- Há chave no carro disponível para pegar
@@ -232,7 +267,7 @@ RegisterNetEvent("pr_carkeys:client:driverSeatValidation", function(result)
     else
         VehicleState.hotwireToken = result.hotwireToken
         -- Sem chave — mantém motor desligado e mostra hint de hotwire
-        SetVehicleEngineOn(vehicle, false, true, true)
+        PRCarkeys.SetEngineState(vehicle, false, true, true, "driver_access_denied")
         if not VehicleState.showHotwireHint then
             lib.showTextUI(Config.Hotwire and Config.Hotwire.hintText or "[H] Ligação direta", {
                 position = "right-center",
@@ -243,21 +278,8 @@ RegisterNetEvent("pr_carkeys:client:driverSeatValidation", function(result)
         end
     end
 
-    -- Thread contínua: mantém motor desligado enquanto não tiver chave
-    -- Continua mesmo se o player tentar religar o motor manualmente
-    if not result.hasAccess and not result.keyAvailable then
-        CreateThread(function()
-            while cache.seat == -1 and not VehicleState.hasKey do
-                if DoesEntityExist(vehicle) then
-                    SetVehicleEngineOn(vehicle, false, true, true)
-                    -- Bloqueia input de motor para não religar
-                    DisableControlAction(0, 86, true)  -- INPUT_VEH_EXIT (E)
-                end
-                Wait(200)
-            end
-            -- Liberou porque ganhou chave (hotwire etc.) — motor pode ligar normalmente
-        end)
-    end
+    -- No per-reply shutdown loop: the engine watchdog handles unauthorized starts.
+
 end)
 
 -- ----------------------------------------------------------------
@@ -269,81 +291,32 @@ end)
 --- Chamado quando o motor LIGA (Z ou destrancar com motor=true)
 --- Remove chave do inventário se estiver lá (permanente OU carkey_temp)
 function PRCarkeys.OnEngineStarted(vehicle, plate)
-    if not Config.KeyInVehicle or not Config.KeyInVehicle.enabled then return end
-    if not plate then return end
-    plate = PRCarkeys.SanitizePlate(plate)
-
-    Debug("INFO", ("[Engine] OnEngineStarted | plate=%s | perm=%s | temp=%s"):format(
-        plate,
-        tostring(VehicleState.permanentKeys[plate] ~= nil),
-        tostring(VehicleState.temporaryKeys[plate] == true)
-    ))
-
-    -- NUNCA retornar cedo com base só em cache local:
-    -- chave na bolsa não entra no RebuildFromInventory, e TempKey pode estar obsoleta.
-    -- O servidor decide (findKeyItemByPlate + duplicate check em VehiclesWithKeyInside).
-
-    -- Não depende exclusivamente do cache local:
-    -- ao ligar, o servidor decide se existe item real (inventário/bolsa) e remove.
-    -- Isso evita falha quando o player liga logo após desligar (antes do rebuild local).
-    local keyData = VehicleState:GetKeyData(plate)
-    Debug("INFO", ("[Engine] Chave vai para o carro | plate=%s | barcode=%s | item=%s"):format(
-        plate,
-        tostring(keyData and keyData.barcode or "unknown"),
-        tostring(keyData and keyData.itemName or "unknown")))
-    TriggerServerEvent("pr_carkeys:server:keyLeftInVehicle",
-        NetworkGetNetworkIdFromEntity(vehicle), plate)
+    if not Config.KeyInVehicle or not Config.KeyInVehicle.enabled then return true end
+    if not plate then return false end
+    local result = pr_lib.callback.await("pr_carkeys:server:putIgnitionKey", false,
+        NetworkGetNetworkIdFromEntity(vehicle), PRCarkeys.SanitizePlate(plate))
+    if type(result) == "table" and result.ok then return true end
+    local reason = type(result) == "table" and result.reason or "no_response"
+    print("[pr_carkeys] OnEngineStarted: " .. tostring(reason))
+    PRCarkeys.Notify({title = "Chave", type = "error", description =
+        reason == "inventory_full" and "Sem espaco para receber a chave. Ela permanece na ignicao; libere espaco e pressione Z novamente."
+        or "Nao foi possivel confirmar a transferencia da chave. Tente novamente."})
+    return false
 end
 
 function PRCarkeys.OnEngineStopped(vehicle, plate)
-    if not Config.KeyInVehicle or not Config.KeyInVehicle.enabled then return end
-    if not plate then return end
-    plate = PRCarkeys.SanitizePlate(plate)
-
-    Debug("INFO", ("[Engine] OnEngineStopped | plate=%s | perm=%s | temp=%s"):format(
-        plate,
-        tostring(VehicleState.permanentKeys[plate] ~= nil),
-        tostring(VehicleState.temporaryKeys[plate] == true)
-    ))
-
-    -- Só devolve se há temp key para esta placa
-    -- NÃO checamos permanentKeys localmente — pode estar desatualizado
-    -- O servidor verifica o estado real em VehiclesWithKeyInside
-    if not VehicleState.temporaryKeys[plate] then
-        Debug("WARNING", ("[Engine] OnEngineStopped — sem temp key para plate=%s, nada a devolver"):format(plate))
-        return
-    end
-
-    Debug("INFO", ("[Engine] Devolvendo chave | plate=%s"):format(plate))
-    TriggerServerEvent("pr_carkeys:server:returnKeyFromVehicle",
-        NetworkGetNetworkIdFromEntity(vehicle), plate)
+    if not Config.KeyInVehicle or not Config.KeyInVehicle.enabled then return true end
+    if not plate then return false end
+    local result = pr_lib.callback.await("pr_carkeys:server:returnIgnitionKey", false,
+        NetworkGetNetworkIdFromEntity(vehicle), PRCarkeys.SanitizePlate(plate))
+    if type(result) == "table" and result.ok then return true end
+    local reason = type(result) == "table" and result.reason or "no_response"
+    print("[pr_carkeys] OnEngineStopped: " .. tostring(reason))
+    PRCarkeys.Notify({title = "Chave", type = "error", description =
+        reason == "inventory_full" and "Sem espaco para receber a chave. Ela permanece na ignicao; libere espaco e pressione Z novamente."
+        or "Nao foi possivel confirmar a transferencia da chave. Tente novamente."})
+    return false
 end
-
--- ----------------------------------------------------------------
--- Bloqueia W (aceleração) quando motor está desligado sem chave
--- O player só pode ligar o motor via Z (toggleengine) ou hotwire
--- ----------------------------------------------------------------
-CreateThread(function()
-    while true do
-        Wait(0)
-        -- Só atua se está no banco do motorista
-        if cache.seat == -1 and VehicleState.currentVehicle ~= 0 then
-            local vehicle = VehicleState.currentVehicle
-            local engineOn = GetIsVehicleEngineRunning(vehicle)
-
-            -- Motor desligado: bloqueia W para não ligar acelerando
-            if not engineOn then
-                -- Bloqueia INPUT_VEH_ACCELERATE (71) e INPUT_VEH_MOVE_UP_ONLY (72)
-                DisableControlAction(0, 71, true)
-                DisableControlAction(0, 72, true)
-                -- Bloqueia também o input de ligar motor via teclado padrão do GTA
-                DisableControlAction(0, 86, true)  -- INPUT_VEH_HANDBRAKE (que também liga motor)
-            end
-        else
-            Wait(500)  -- Fora do banco, polling mais lento
-        end
-    end
-end)
 
 -- ----------------------------------------------------------------
 -- Watchdog de segurança do motor:
@@ -357,16 +330,25 @@ CreateThread(function()
             local vehicle  = VehicleState.currentVehicle
             local engineOn = GetIsVehicleEngineRunning(vehicle)
 
-            if engineOn and not wasEngineOn then
+            if engineOn and not wasEngineOn and PRCarkeys.engineTransitionVehicle ~= vehicle then
                 local plate = VehicleState.currentPlate
                 if not plate then
-                    SetVehicleEngineOn(vehicle, false, true, true)
+                    PRCarkeys.SetEngineState(vehicle, false, true, true, "missing_vehicle_plate")
                     VehicleState.isEngineRunning = false
                     VehicleState.hasKey = false
                 else
+                    local revision = PRCarkeys.engineAccessRevision
                     local hasAccess = pr_lib.callback.await("pr_carkeys:server:validateKeyAccess", false, plate)
+                    -- The callback yields. Do not apply an old reply after exit or vehicle change.
+                    if revision ~= PRCarkeys.engineAccessRevision or PRCarkeys.engineTransitionVehicle == vehicle
+                        or VehicleState.currentVehicle ~= vehicle or VehicleState.currentPlate ~= plate
+                        or not DoesEntityExist(vehicle) or GetPedInVehicleSeat(vehicle, -1) ~= PlayerPedId() then
+                        wasEngineOn = false
+                        goto nextEngineCheck
+                    end
+
                     if not hasAccess then
-                        SetVehicleEngineOn(vehicle, false, true, true)
+                        PRCarkeys.SetEngineState(vehicle, false, true, true, "watchdog_access_denied")
                         VehicleState.isEngineRunning = false
                         VehicleState.hasKey = false
                         PRCarkeys.Notify(Config.Notify.noPermission)
@@ -376,10 +358,12 @@ CreateThread(function()
                     end
                 end
             elseif not engineOn then
+                PRCarkeys.BlockAutomaticEngineStart()
                 VehicleState.isEngineRunning = false
             end
 
             wasEngineOn = engineOn
+            ::nextEngineCheck::
             Wait(250)
         else
             wasEngineOn = false
@@ -403,21 +387,8 @@ RegisterNetEvent("pr_carkeys:client:keyAvailableInVehicle", function(plate, barc
     if VehicleState.currentPlate ~= plate then return end
     if cache.seat ~= -1 then return end
 
-    local pickupTime = Config.KeyInVehicle and Config.KeyInVehicle.pickupTime or 0
-    if pickupTime > 0 then
-        if lib.progressBar({
-            duration  = pickupTime,
-            label     = (Config.KeyInVehicle and Config.KeyInVehicle.pickupLabel) or "Pegando chave...",
-            canCancel = true,
-            disable   = { move = false, car = true, combat = true },
-        }) then
-            TriggerServerEvent("pr_carkeys:server:pickupKeyFromVehicle",
-                NetworkGetNetworkIdFromEntity(cache.vehicle), plate, barcode)
-        end
-    else
-        TriggerServerEvent("pr_carkeys:server:pickupKeyFromVehicle",
-            NetworkGetNetworkIdFromEntity(cache.vehicle), plate, barcode)
-    end
+    requestDriverValidation(cache.vehicle, plate)
+
 end)
 
 -- ----------------------------------------------------------------
@@ -455,16 +426,8 @@ RegisterNetEvent("pr_carkeys:client:removeTempKey", function(plate)
     plate = PRCarkeys.SanitizePlate(plate)
     VehicleState:RemoveTempKey(plate)
     if VehicleState.currentPlate == plate and cache.seat == -1 then
-        VehicleState.hasKey = false
-        SetVehicleEngineOn(cache.vehicle, false, false, true)
-        VehicleState.isEngineRunning = false
-        if not VehicleState.showHotwireHint then
-            lib.showTextUI(Config.Hotwire and Config.Hotwire.hintText or "[H] Ligar na força", {
-                position = "right-center", icon = "bolt",
-            })
-            VehicleState.showHotwireHint = true
-            VehicleState.textUiMode = "hotwire"
-        end
+        -- Removing one key type does not prove that all access was revoked.
+        requestDriverValidation(VehicleState.currentVehicle, plate)
     end
 end)
 
@@ -476,7 +439,9 @@ RegisterNetEvent("pr_carkeys:client:keyTakenFromVehicle", function(plate)
     VehicleState:RemoveTempKey(plate)
     VehicleState:RemovePermanentKey(plate)
     if VehicleState.currentPlate == plate and VehicleState.currentVehicle ~= 0 then
-        SetVehicleEngineOn(VehicleState.currentVehicle, false, false, true)
+        PRCarkeys.engineAccessRevision = PRCarkeys.engineAccessRevision + 1
+        Entity(VehicleState.currentVehicle).state:set("pr_carkeys_ignition", false, true)
+        PRCarkeys.SetEngineState(VehicleState.currentVehicle, false, false, true, "ignition_key_taken")
         VehicleState.isEngineRunning = false
         VehicleState.hasKey = false
     end
@@ -570,20 +535,7 @@ AddEventHandler("ox:playerLogout",               onPlayerUnload)
 
 AddEventHandler("onResourceStart", function(resource)
     if GetCurrentResourceName() ~= resource then return end
-    if LocalPlayer.state.isLoggedIn then onPlayerLoaded() end
-end)
-
--- ================================================================
---   EXPORTS CLIENT
--- ================================================================
-exports("HaveKey",          function(plate) return VehicleState:HasKey(plate) end)
-exports("HavePermanentKey", function(plate)
-    if not plate then return false end
-    return VehicleState.permanentKeys[PRCarkeys.SanitizePlate(plate)] ~= nil
-end)
-exports("HaveTempKey", function(plate)
-    if not plate then return false end
-    return VehicleState.temporaryKeys[PRCarkeys.SanitizePlate(plate)] == true
+    if (pr_lib.framework.IsSessionReady or pr_lib.framework.IsPlayerLoaded)() then onPlayerLoaded() end
 end)
 
 -- ----------------------------------------------------------------
@@ -627,23 +579,8 @@ RegisterNetEvent("pr_carkeys:client:forceInventoryRebuild", function()
     VehicleState:RebuildFromInventory()
     fetchAllKeyDbData()
 
-    -- Se está no banco do motorista do veículo afetado, reavalia acesso
     if VehicleState.currentVehicle ~= 0 and cache.seat == -1 then
-        VehicleState.hasKey = VehicleState:HasKey(VehicleState.currentPlate)
-
-        if not VehicleState.hasKey then
-            -- Perdeu o acesso — desliga motor e mostra hint
-            SetVehicleEngineOn(VehicleState.currentVehicle, false, false, true)
-            VehicleState.isEngineRunning = false
-            if not VehicleState.showHotwireHint then
-                lib.showTextUI(Config.Hotwire and Config.Hotwire.hintText or "[H] Ligar na força", {
-                    position = "right-center",
-                    icon     = "bolt",
-                })
-                VehicleState.showHotwireHint = true
-                VehicleState.textUiMode = "hotwire"
-            end
-        end
+        requestDriverValidation(VehicleState.currentVehicle, VehicleState.currentPlate)
     end
 
     PRCarkeys.Notify(Config.Notify.noPermission)
@@ -658,8 +595,15 @@ RegisterNetEvent("pr_carkeys:client:forceEngineOff", function(vehNetId)
         and NetToVeh(vehNetId) or nil
 
     if not vehicle or not DoesEntityExist(vehicle) then return end
+    if PRCarkeys.engineTransitionVehicle == vehicle then
+        PRCarkeys.engineAccessRevision = PRCarkeys.engineAccessRevision + 1
+    end
+    if NetworkHasControlOfEntity(vehicle) then
+        Entity(vehicle).state:set("pr_carkeys_ignition", false, true)
+    end
 
-    SetVehicleEngineOn(vehicle, false, true, true)
+
+    PRCarkeys.SetEngineState(vehicle, false, true, true, "ignition_key_expired")
     VehicleState.isEngineRunning = false
 
     -- Se o player está no banco do motorista desse veículo, mostra hint
@@ -833,6 +777,11 @@ CreateThread(function()
     while true do
         Wait(500)
 
+        -- só uma pequena verificaçao do veiculo ligado
+        if cache.vehicle and cache.vehicle ~= 0 and cache.seat == -1 then
+            lastKnownEngineState = GetIsVehicleEngineRunning(cache.vehicle)
+        end
+
         if cache.vehicle then goto continue end
 
         local vehicle = pr_lib.framework.GetClosestVehicle and pr_lib.framework.GetClosestVehicle() or nil
@@ -844,7 +793,7 @@ CreateThread(function()
             or GetPedInVehicleSeat(vehicle, -1) ~= 0
             or GetIsVehicleEngineRunning(vehicle) then goto continue end
 
-        local plate = PRCarkeys.SanitizePlate(GetVehicleNumberPlateText(vehicle))
+        local plate = PRCarkeys.GetVehicleKeyPlate(vehicle)
         if VehicleState:HasKey(plate) then goto continue end
 
         local lockStatus = GetVehicleDoorLockStatus(vehicle)
@@ -860,3 +809,4 @@ CreateThread(function()
         ::continue::
     end
 end)
+

@@ -176,4 +176,6 @@ function VehicleState:Reset()
     self.textUiMode      = nil
 end
 
+PRCarkeys.VehicleState = VehicleState
+
 return VehicleState

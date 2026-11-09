@@ -132,6 +132,11 @@ RegisterNetEvent("pr_carkeys:server:updateKeyConfig", function(barcode, field, v
         return
     end
 
+    if field == "distance" then
+        value = tonumber(value)
+        if not value or value ~= value or value < 1 or value > (Config.Default.MaxSignalDistance or 50) then return end
+    end
+
     local row = PRCarkeys.Cache.GetKey(barcode)
     if not row then
         Debug("WARNING", ("updateKeyConfig: barcode '%s' nao encontrado."):format(barcode))

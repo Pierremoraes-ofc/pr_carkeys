@@ -19,4 +19,6 @@ function KeyInVehicle:OnEngineStop(vehicle, plate)
     end
 end
 
+PRCarkeys.KeyInVehicle = KeyInVehicle
+
 return KeyInVehicle
