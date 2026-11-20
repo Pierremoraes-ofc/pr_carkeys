@@ -1,6 +1,6 @@
 name          "pr_carkeys"
 description   "Sistema de Chaves de Veículo"
-version       "1.3.1"
+version       "1.3.3"
 author        "Pierremoraes-ofc"
 repository    "https://github.com/Pierremoraes-ofc/pr_carkeys"
 
